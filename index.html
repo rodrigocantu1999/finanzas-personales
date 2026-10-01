@@ -723,11 +723,11 @@ function totalPatrimonio(){
     const bal=calcAccBalance(acc.id);
     if((acc.currency||'MXN')==='USD') usd+=bal;
     else{
-      if(acc.type==='credit') mxn-=bal;
+      if(acc.type==='credit') mxn+=bal;
       else mxn+=bal;
     }
   });
-  const tc=getTC(S.month);
+  const tc=getTC(currentMonth());
   return{mxn,usd,total:mxn+usd*tc,tc};
 }
 
@@ -926,7 +926,7 @@ function renderDash(){
     const cur=acc.currency||'MXN';
     const isU=cur==='USD';
     const type=acc.type||'other';
-    const balColor=type==='credit'?(bal<=0?'var(--green)':'var(--red)'):(bal>=0?'var(--green)':'var(--red)');
+    const balColor=bal>=0?'var(--green)':'var(--red)';
     html+=`<div class="acc-card" style="border-left-color:${acc.color}" onclick="switchTab('tabCuentas')">
       <div class="acc-name">${acc.icon} ${acc.name}</div>
       <div class="acc-bal" style="color:${balColor}">${isU?fmt(bal,'USD'):fmt(bal)}</div>
@@ -1370,7 +1370,7 @@ function renderCuentas(){
       const bal=calcAccBalance(acc.id);
       const cur=acc.currency||'MXN';
       const isU=cur==='USD';
-      const balColor=type==='credit'?(bal<=0?'var(--green)':'var(--red)'):(bal>=0?'var(--green)':'var(--red)');
+      const balColor=bal>=0?'var(--green)':'var(--red)';
 
       html+=`<div class="card pointer" style="padding:12px 16px;border-left:3px solid ${acc.color}" onclick="openAccModal('${acc.id}')">
         <div class="flex-between" style="align-items:center">
