@@ -548,6 +548,15 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 </div>
 </div>
 
+<!-- Mark Paid Account Selection Modal -->
+<div class="modal-overlay" id="markPaidModal">
+<div class="modal" style="padding-bottom:30px">
+  <div class="modal-title"><span>¿En qué cuenta recibiste?</span><button class="modal-close" onclick="closeModal('markPaidModal')">&times;</button></div>
+  <div id="markPaidInfo" class="text-sm mb-12" style="color:var(--txt2)"></div>
+  <div id="markPaidAccList" style="display:flex;flex-direction:column;gap:8px"></div>
+</div>
+</div>
+
 <!-- Reassign Category Modal -->
 <div class="modal-overlay" id="reassignModal">
 <div class="modal">
@@ -1239,12 +1248,84 @@ function filterTransferType(type){
 }
 
 // Shared expense actions
-async function markPaid(txId,personIdx){
+let _markPaidPending=null;
+function markPaid(txId,personIdx){
   const tx=S.transactions.find(t=>t.id===txId);
   if(!tx||!tx.shared) return;
+  const person=tx.shared.people[personIdx];
+  _markPaidPending={txId,personIdx,person,tx};
+
+  // Show info
+  const isU=tx.currency==='USD';
+  document.getElementById('markPaidInfo').innerHTML=`<strong>${person.name}</strong> te paga <strong>${isU?fmt(person.amount,'USD'):fmt(person.amount)}</strong> por "${tx.ds}"`;
+
+  // Build account list
+  let html='';
+  S.accounts.forEach(acc=>{
+    html+=`<button class="btn" style="width:100%;padding:12px;text-align:left;background:var(--card2);border:1px solid var(--border);display:flex;align-items:center;gap:10px" onclick="confirmMarkPaid('${acc.id}')">
+      <span style="font-size:1.2rem">${acc.icon}</span>
+      <span class="fw-500">${acc.name}</span>
+      <span class="text-xs" style="color:var(--txt3);margin-left:auto">${acc.currency||'MXN'}</span>
+    </button>`;
+  });
+  document.getElementById('markPaidAccList').innerHTML=html;
+  openModal('markPaidModal');
+}
+
+async function confirmMarkPaid(accId){
+  closeModal('markPaidModal');
+  if(!_markPaidPending) return;
+  const{txId,personIdx,person,tx}=_markPaidPending;
+  _markPaidPending=null;
+
+  // 1. Mark as paid
   tx.shared.people[personIdx].paid=true;
   await fsUpdate('transactions',txId,{shared:tx.shared});
+
+  // 2. Create income transaction for the payment received
+  const acc=getAcc(accId);
+  const accCur=acc.currency||'MXN';
+  const txCur=tx.currency||'MXN';
+
+  // Determine amount in the account's currency
+  let incomeAmount=person.amount;
+  const incomeData={
+    tp:'income',
+    a:incomeAmount,
+    ds:'Cobro compartido: '+person.name+' - '+tx.ds,
+    c:findOrCreateIncomeCategory(),
+    acc:accId,
+    d:today(),
+    currency:txCur,
+  };
+
+  // If original was USD, add exchange rate
+  if(txCur==='USD'){
+    incomeData.exchangeRate=getTC(currentMonth());
+    incomeData.amountMXN=incomeAmount*incomeData.exchangeRate;
+  }
+
+  const id=uid();
+  incomeData.id=id;
+  await fsSet('transactions',id,incomeData);
+  S.transactions.push(incomeData);
+
   R();
+}
+
+function findOrCreateIncomeCategory(){
+  // Look for existing income category that fits
+  const existing=S.categories.find(c=>c.type==='income'&&(c.name.toLowerCase().includes('cobro')||c.name.toLowerCase().includes('compartido')||c.name.toLowerCase().includes('reembolso')));
+  if(existing) return existing.id;
+  // Use first income category available
+  const anyIncome=S.categories.find(c=>c.type==='income');
+  if(anyIncome) return anyIncome.id;
+  // Fallback: create one
+  const id=uid();
+  const cat={id,name:'Cobros compartidos',emoji:'🤝',color:'#16803C',type:'income'};
+  fsSet('categories',id,cat);
+  S.categories.push(cat);
+  return id;
 }
 
 async function absorbShare(txId,personIdx){
