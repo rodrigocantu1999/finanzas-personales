@@ -147,12 +147,6 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 .shared-actions{display:flex;gap:4px}
 
 /* Bulk selection */
-.bulk-bar{position:fixed;top:0;left:0;right:0;background:var(--accent);color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;z-index:150;display:none}
-.bulk-bar.show{display:flex}
-.bulk-bar .bulk-count{font-weight:600}
-.bulk-bar .bulk-actions{display:flex;gap:8px}
-.tx-checkbox{width:20px;height:20px;accent-color:var(--accent);flex-shrink:0;display:none}
-.selecting .tx-checkbox{display:block}
 
 /* Category grid */
 .cat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-height:300px;overflow-y:auto}
@@ -288,15 +282,6 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 </head>
 
 <body>
-<!-- Bulk Selection Bar -->
-<div class="bulk-bar" id="bulkBar">
-  <div><span class="bulk-count" id="bulkCount">0</span> seleccionados</div>
-  <div class="bulk-actions">
-    <button class="btn btn-sm" onclick="bulkCategory()" style="background:#fff;color:var(--accent)">Categoria</button>
-    <button class="btn btn-sm" onclick="bulkConcept()" style="background:#fff;color:var(--accent)">Concepto</button>
-    <button class="btn btn-sm" onclick="exitBulk()" style="background:transparent;border:1px solid #fff;color:#fff">Cancelar</button>
-  </div>
-</div>
 
 <!-- Migration Banner -->
 <div id="migrationBanner" class="container" style="display:none;padding-top:16px">
@@ -573,13 +558,6 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 </div>
 </div>
 
-<!-- Bulk Category Modal -->
-<div class="modal-overlay" id="bulkCatModal">
-<div class="modal">
-  <div class="modal-title"><span>Cambiar categoria</span><button class="modal-close" onclick="closeModal('bulkCatModal')">&times;</button></div>
-  <div class="cat-grid" id="bulkCatGrid"></div>
-</div>
-</div>
 
 <!-- Goal/Debt Action Modal -->
 <div class="modal-overlay" id="actionModal">
@@ -627,7 +605,6 @@ let S={
   month:'',year:0,
   currentTab:'tabInicio',
   movsTypeFilter:'all',movsAccFilter:'all',movsCatFilter:'all',
-  bulkSelected:new Set(),selecting:false,
   txType:'expense',txCurrency:'MXN',
   trType:'transfer',
   accCurrency:'MXN',
@@ -1034,9 +1011,17 @@ function renderDash(){
       data.details.forEach(d=>{
         const cat=getCat(d.tx.c);
         const isU=d.tx.currency==='USD';
-        html+=`<div class="flex-between text-xs" style="padding:4px 0;color:var(--txt2)">
-          <div>${cat.emoji} ${d.tx.ds} <span style="color:var(--txt3)">· ${dayLabel(d.tx.d)}</span></div>
-          <div class="text-mono">${isU?fmt(d.person.amount,'USD')+' <span style="color:var(--txt3)">≈'+fmt(d.amtMXN)+'</span>':fmt(d.person.amount)}</div>
+        const pIdx=d.tx.shared.people.findIndex(pp=>pp.name===d.person.name&&!pp.paid&&!pp.absorbed);
+        html+=`<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+          <div class="flex-between text-xs" style="color:var(--txt2)">
+            <div>${cat.emoji} ${d.tx.ds} <span style="color:var(--txt3)">· ${dayLabel(d.tx.d)}</span></div>
+            <div class="text-mono">${isU?fmt(d.person.amount,'USD')+' <span style="color:var(--txt3)">≈'+fmt(d.amtMXN)+'</span>':fmt(d.person.amount)}</div>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button class="btn btn-xs" style="background:var(--green);color:#fff;font-size:.65rem;padding:3px 8px;border-radius:6px" onclick="event.stopPropagation();markPaid('${d.tx.id}',${pIdx})">✓ Ya me pagó</button>
+            <button class="btn btn-xs" style="background:var(--accent);color:#fff;font-size:.65rem;padding:3px 8px;border-radius:6px" onclick="event.stopPropagation();absorbShare('${d.tx.id}',${pIdx})">Absorber</button>
+            <button class="btn btn-xs" style="background:var(--bg3);color:var(--txt);font-size:.65rem;padding:3px 8px;border-radius:6px" onclick="event.stopPropagation();openTxModal('expense','${d.tx.id}')">Editar</button>
+          </div>
         </div>`;
       });
       html+=`</div></div>`;
@@ -1163,9 +1148,8 @@ function renderMovs(){
     html+=`<div class="empty-state"><span>📭</span><p>Sin movimientos este mes</p></div>`;
   }
 
-  const selectingClass=S.selecting?' selecting':'';
   Object.entries(groups).sort((a,b)=>b[0].localeCompare(a[0])).forEach(([day,dayItems])=>{
-    html+=`<div class="mb-12"><div class="text-xs fw-600 mb-4" style="color:var(--txt3)">${dayLabel(day)}</div><div class="card${selectingClass}" style="padding:8px 12px">`;
+    html+=`<div class="mb-12"><div class="text-xs fw-600 mb-4" style="color:var(--txt3)">${dayLabel(day)}</div><div class="card" style="padding:8px 12px">`;
     dayItems.forEach(item=>{
       if(item._isTr){
         // Transfer item
@@ -1185,9 +1169,7 @@ function renderMovs(){
         const isU=item.currency==='USD';
         const real=isI?item.a:realExpense(item);
         const isShared=item.shared&&item.shared.enabled;
-        const checked=S.bulkSelected.has(item.id)?'checked':'';
-        html+=`<div class="tx-item" ${S.selecting?'':`oncontextmenu="event.preventDefault();startBulk('${item.id}')" ontouchstart="startLongPress('${item.id}',event)" ontouchend="cancelLongPress()"`} onclick="${S.selecting?`toggleBulk('${item.id}')`:`openTxModal('${item.tp}','${item.id}')`}">
-          <input type="checkbox" class="tx-checkbox" ${checked} onclick="event.stopPropagation();toggleBulk('${item.id}')">
+        html+=`<div class="tx-item" onclick="openTxModal('${item.tp}','${item.id}')">
           <div class="tx-icon" style="background:${cat.color}22">${cat.emoji}</div>
           <div class="tx-info">
             <div class="tx-desc">${item.ds}${isShared?'<span class="shared-badge">Compartido</span>':''}</div>
@@ -1254,75 +1236,6 @@ function filterTransferType(type){
       }
     }
   });
-}
-
-// Bulk selection
-let _longPressTimer=null;
-function startLongPress(id,e){
-  _longPressTimer=setTimeout(()=>{startBulk(id)},600);
-}
-function cancelLongPress(){clearTimeout(_longPressTimer)}
-function startBulk(id){
-  S.selecting=true;
-  S.bulkSelected.clear();
-  S.bulkSelected.add(id);
-  updateBulkUI();
-  renderMovs();
-}
-function toggleBulk(id){
-  if(S.bulkSelected.has(id)) S.bulkSelected.delete(id);
-  else S.bulkSelected.add(id);
-  if(S.bulkSelected.size===0) exitBulk();
-  else updateBulkUI();
-}
-function exitBulk(){
-  S.selecting=false;
-  S.bulkSelected.clear();
-  document.getElementById('bulkBar').classList.remove('show');
-  renderMovs();
-}
-function updateBulkUI(){
-  document.getElementById('bulkBar').classList.toggle('show',S.selecting);
-  document.getElementById('bulkCount').textContent=S.bulkSelected.size;
-}
-
-async function bulkCategory(){
-  // Show category grid modal
-  let html='';
-  S.categories.filter(c=>c.type==='expense').forEach(cat=>{
-    html+=`<div class="cat-grid-item" onclick="applyBulkCat('${cat.id}')"><div class="cat-emoji">${cat.emoji}</div><div class="cat-name">${cat.name}</div></div>`;
-  });
-  document.getElementById('bulkCatGrid').innerHTML=html;
-  openModal('bulkCatModal');
-}
-
-async function applyBulkCat(catId){
-  closeModal('bulkCatModal');
-  const ids=[...S.bulkSelected];
-  const batch=db.batch();
-  ids.forEach(id=>{
-    batch.update(db.collection('transactions').doc(id),{c:catId});
-    const tx=S.transactions.find(t=>t.id===id);
-    if(tx) tx.c=catId;
-  });
-  await batch.commit();
-  exitBulk();
-  R();
-}
-
-async function bulkConcept(){
-  const txt=prompt('Nuevo concepto para los '+S.bulkSelected.size+' movimientos:');
-  if(!txt) return;
-  const ids=[...S.bulkSelected];
-  const batch=db.batch();
-  ids.forEach(id=>{
-    batch.update(db.collection('transactions').doc(id),{ds:txt});
-    const tx=S.transactions.find(t=>t.id===id);
-    if(tx) tx.ds=txt;
-  });
-  await batch.commit();
-  exitBulk();
-  R();
 }
 
 // Shared expense actions
