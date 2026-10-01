@@ -209,6 +209,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 .transfer-badge{font-size:.7rem;padding:2px 8px;border-radius:10px;font-weight:600}
 .transfer-badge.transfer{background:#D9770622;color:var(--accent)}
 .transfer-badge.adjustment{background:#EAB30822;color:var(--yellow)}
+.transfer-badge.reimbursement{background:#16803C22;color:var(--green)}
 
 /* Currency toggle */
 .currency-toggle{display:flex;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}
@@ -1162,14 +1163,17 @@ function renderMovs(){
     dayItems.forEach(item=>{
       if(item._isTr){
         // Transfer item
-        const fromAcc=getAcc(item.from);
-        const toAcc=getAcc(item.to);
+        const fromAcc=item.from?getAcc(item.from):null;
+        const toAcc=item.to?getAcc(item.to):null;
         const isConv=item.fromCurrency&&item.fromCurrency!==item.toCurrency;
-        const typeBadge=item.type==='adjustment'?'<span class="transfer-badge adjustment">Ajuste</span>':'<span class="transfer-badge transfer">Traspaso</span>';
+        const typeBadge=item.type==='reimbursement'?'<span class="transfer-badge reimbursement">Reembolso</span>':item.type==='adjustment'?'<span class="transfer-badge adjustment">Ajuste</span>':'<span class="transfer-badge transfer">Traspaso</span>';
+        const isReimb=item.type==='reimbursement';
+        const iconBg=isReimb?'var(--green)':item.type==='adjustment'?'var(--yellow)':'var(--accent)';
+        const iconEmoji=isReimb?'💸':item.type==='adjustment'?'⚖️':'🔄';
         html+=`<div class="tx-item" onclick="openTrModal('${item.id}')">
-          <div class="tx-icon" style="background:${item.type==='adjustment'?'var(--yellow)':'var(--accent)'}22">${item.type==='adjustment'?'⚖️':'🔄'}</div>
-          <div class="tx-info"><div class="tx-desc">${item.desc||'Transferencia'} ${typeBadge}</div><div class="tx-cat">${fromAcc.icon} ${fromAcc.name} → ${toAcc.icon} ${toAcc.name}</div></div>
-          <div class="tx-amount" style="color:var(--txt)">${isConv?fmt(item.fromAmount||item.amount,item.fromCurrency)+' → '+fmt(item.toAmount||item.amount,item.toCurrency||'MXN'):fmt(item.amount)}</div>
+          <div class="tx-icon" style="background:${iconBg}22">${iconEmoji}</div>
+          <div class="tx-info"><div class="tx-desc">${item.desc||'Transferencia'} ${typeBadge}</div><div class="tx-cat">${isReimb?'→ '+(toAcc?toAcc.icon+' '+toAcc.name:''):(fromAcc?fromAcc.icon+' '+fromAcc.name:'')+' → '+(toAcc?toAcc.icon+' '+toAcc.name:'')}</div></div>
+          <div class="tx-amount" style="color:${isReimb?'var(--green)':'var(--txt)'}">${isReimb?'+'+fmt(item.amount,item.currency):isConv?fmt(item.fromAmount||item.amount,item.fromCurrency)+' → '+fmt(item.toAmount||item.amount,item.toCurrency||'MXN'):fmt(item.amount)}</div>
         </div>`;
       } else {
         // Transaction item
@@ -1282,50 +1286,30 @@ async function confirmMarkPaid(accId){
   tx.shared.people[personIdx].paid=true;
   await fsUpdate('transactions',txId,{shared:tx.shared});
 
-  // 2. Create income transaction for the payment received
-  const acc=getAcc(accId);
-  const accCur=acc.currency||'MXN';
+  // 2. Create reimbursement transfer (not income — doesn't affect income/expense totals)
   const txCur=tx.currency||'MXN';
-
-  // Determine amount in the account's currency
-  let incomeAmount=person.amount;
-  const incomeData={
-    tp:'income',
-    a:incomeAmount,
-    ds:'Cobro compartido: '+person.name+' - '+tx.ds,
-    c:findOrCreateIncomeCategory(),
-    acc:accId,
+  const trData={
+    type:'reimbursement',
+    to:accId,
+    from:null,
+    amount:person.amount,
+    desc:'Reembolso: '+person.name+' - '+tx.ds,
     d:today(),
     currency:txCur,
+    toCurrency:txCur,
+    fromCurrency:txCur,
   };
-
-  // If original was USD, add exchange rate
   if(txCur==='USD'){
-    incomeData.exchangeRate=getTC(currentMonth());
-    incomeData.amountMXN=incomeAmount*incomeData.exchangeRate;
+    trData.toAmount=person.amount;
+    trData.fromAmount=person.amount;
+    trData.exchangeRate=getTC(currentMonth());
   }
-
   const id=uid();
-  incomeData.id=id;
-  await fsSet('transactions',id,incomeData);
-  S.transactions.push(incomeData);
+  trData.id=id;
+  await fsSet('transfers',id,trData);
+  S.transfers.push(trData);
 
   R();
-}
-
-function findOrCreateIncomeCategory(){
-  // Look for existing income category that fits
-  const existing=S.categories.find(c=>c.type==='income'&&(c.name.toLowerCase().includes('cobro')||c.name.toLowerCase().includes('compartido')||c.name.toLowerCase().includes('reembolso')));
-  if(existing) return existing.id;
-  // Use first income category available
-  const anyIncome=S.categories.find(c=>c.type==='income');
-  if(anyIncome) return anyIncome.id;
-  // Fallback: create one
-  const id=uid();
-  const cat={id,name:'Cobros compartidos',emoji:'🤝',color:'#16803C',type:'income'};
-  fsSet('categories',id,cat);
-  S.categories.push(cat);
-  return id;
 }
 
 async function absorbShare(txId,personIdx){
