@@ -655,8 +655,7 @@ function pct(a,b){return b?Math.round(a/b*100):0}
 function getTC(month){return S.exchangeRates[month]||S.exchangeRates[S.month]||20}
 function txToMXN(tx){
   if(!tx.currency||tx.currency==='MXN') return tx.a;
-  if(tx.amountMXN) return tx.amountMXN;
-  return tx.a*(tx.exchangeRate||getTC(mk(tx.d)));
+  return tx.a*getTC(mk(tx.d));
 }
 function accCurrency(accId){
   const acc=S.accounts.find(a=>a.id===accId);
@@ -678,7 +677,7 @@ function realExpense(tx){
 function realExpenseMXN(tx){
   if(tx.shared&&tx.shared.enabled){
     const share=tx.shared.myShare||0;
-    if(tx.currency==='USD') return share*(tx.exchangeRate||getTC(mk(tx.d)));
+    if(tx.currency==='USD') return share*getTC(mk(tx.d));
     return share;
   }
   return txToMXN(tx);
