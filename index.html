@@ -1003,6 +1003,47 @@ function renderDash(){
     html+=`</div>`;
   }
 
+  // Who owes you (all time, not just this month)
+  const owedByPerson={};
+  S.transactions.forEach(tx=>{
+    if(!tx.shared||!tx.shared.enabled||!tx.shared.people) return;
+    tx.shared.people.forEach(p=>{
+      if(p.paid||p.absorbed) return;
+      const name=p.name||'?';
+      if(!owedByPerson[name]) owedByPerson[name]={total:0,details:[]};
+      const amtMXN=tx.currency==='USD'?p.amount*getTC(mk(tx.d)):p.amount;
+      owedByPerson[name].total+=amtMXN;
+      owedByPerson[name].details.push({tx,person:p,amtMXN});
+    });
+  });
+  const owedEntries=Object.entries(owedByPerson).sort((a,b)=>b[1].total-a[1].total);
+  if(owedEntries.length){
+    const totalOwed=owedEntries.reduce((s,e)=>s+e[1].total,0);
+    html+=`<div class="card"><div class="flex-between mb-8"><div class="text-sm fw-600">Te deben</div><div class="text-mono fw-600" style="color:var(--accent)">${fmt(totalOwed)}</div></div>`;
+    owedEntries.forEach(([name,data])=>{
+      const detailId='owed_'+name.replace(/\s/g,'_');
+      html+=`<div class="pointer" onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'block':'none'" style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div class="flex-between" style="align-items:center">
+          <div class="flex gap-8" style="align-items:center">
+            <div style="width:32px;height:32px;border-radius:50%;background:var(--accent)20;display:flex;align-items:center;justify-content:center;font-size:.85rem">👤</div>
+            <div><div class="text-sm fw-600">${name}</div><div class="text-xs" style="color:var(--txt3)">${data.details.length} gasto${data.details.length>1?'s':''} pendiente${data.details.length>1?'s':''}</div></div>
+          </div>
+          <div class="text-mono fw-600" style="color:var(--orange)">${fmt(data.total)}</div>
+        </div>
+        <div id="${detailId}" style="display:none;margin-top:8px;padding-left:40px">`;
+      data.details.forEach(d=>{
+        const cat=getCat(d.tx.c);
+        const isU=d.tx.currency==='USD';
+        html+=`<div class="flex-between text-xs" style="padding:4px 0;color:var(--txt2)">
+          <div>${cat.emoji} ${d.tx.ds} <span style="color:var(--txt3)">· ${dayLabel(d.tx.d)}</span></div>
+          <div class="text-mono">${isU?fmt(d.person.amount,'USD')+' <span style="color:var(--txt3)">≈'+fmt(d.amtMXN)+'</span>':fmt(d.person.amount)}</div>
+        </div>`;
+      });
+      html+=`</div></div>`;
+    });
+    html+=`</div>`;
+  }
+
   // Recent transactions (last 5)
   const recent=S.transactions.filter(t=>mk(t.d)===m).sort((a,b)=>b.d.localeCompare(a.d)).slice(0,5);
   if(recent.length){
