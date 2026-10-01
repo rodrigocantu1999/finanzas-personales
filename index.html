@@ -717,17 +717,14 @@ function calcAccBalance(accId){
   return bal;
 }
 
-function totalPatrimonio(){
+function totalPatrimonio(month){
   let mxn=0,usd=0;
   S.accounts.forEach(acc=>{
     const bal=calcAccBalance(acc.id);
     if((acc.currency||'MXN')==='USD') usd+=bal;
-    else{
-      if(acc.type==='credit') mxn+=bal;
-      else mxn+=bal;
-    }
+    else mxn+=bal;
   });
-  const tc=getTC(currentMonth());
+  const tc=getTC(month||S.month);
   return{mxn,usd,total:mxn+usd*tc,tc};
 }
 
@@ -892,7 +889,7 @@ function renderDash(){
       </div>
     </div>
     <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.2);display:flex;justify-content:space-between;align-items:center">
-      <div><span style="font-size:.7rem;opacity:.8">Patrimonio</span></div>
+      <div><span style="font-size:.7rem;opacity:.8">Patrimonio</span>${pat.usd?`<span style="font-size:.6rem;opacity:.6;margin-left:4px">TC $${pat.tc.toFixed(2)}</span>`:''}</div>
       <div style="text-align:right">
         <div style="font-family:var(--mono);font-weight:700;font-size:1rem">${fmt(pat.total)}</div>
         <div style="font-size:.65rem;opacity:.7">🇲🇽 ${fmt(pat.mxn)} ${pat.usd?'| 🇺🇸 '+fmt(pat.usd,'USD'):''}</div>
