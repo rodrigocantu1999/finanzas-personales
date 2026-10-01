@@ -2,7 +2,7 @@
   "name": "Finanzas Personales",
   "short_name": "Finanzas",
   "description": "Tu app de finanzas personales",
-  "start_url": "/",
+  "start_url": "/finanzas-personales/",
   "display": "standalone",
   "background_color": "#0B1D33",
   "theme_color": "#0B1D33",
