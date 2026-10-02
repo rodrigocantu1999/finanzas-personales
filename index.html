@@ -554,6 +554,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 <div class="modal" style="padding-bottom:30px">
   <div class="modal-title"><span>¿En qué cuenta recibiste?</span><button class="modal-close" onclick="closeModal('markPaidModal')">&times;</button></div>
   <div id="markPaidInfo" class="text-sm mb-12" style="color:var(--txt2)"></div>
+  <div class="mb-12"><label class="text-xs fw-600" style="color:var(--txt3)">Fecha de pago</label><input type="date" id="markPaidDate" class="input" style="margin-top:4px"></div>
   <div id="markPaidAccList" style="display:flex;flex-direction:column;gap:8px"></div>
 </div>
 </div>
@@ -1104,6 +1105,12 @@ function renderMovs(){
     if(S.movsAccFilter!=='all') txs=txs.filter(t=>t.acc===S.movsAccFilter);
     if(S.movsCatFilter!=='all') txs=txs.filter(t=>t.c===S.movsCatFilter);
     items=txs;
+    // Include reimbursement transfers in "Todos" view so user can see them
+    if(S.movsTypeFilter==='all'){
+      let reimb=S.transfers.filter(t=>t.type==='reimbursement'&&mk(t.d)===m);
+      if(S.movsAccFilter!=='all') reimb=reimb.filter(t=>t.to===S.movsAccFilter);
+      items=items.concat(reimb.map(t=>({...t,_isTr:true})));
+    }
   }
 
   // Account filter summary
@@ -1273,6 +1280,7 @@ function markPaid(txId,personIdx){
     </button>`;
   });
   document.getElementById('markPaidAccList').innerHTML=html;
+  document.getElementById('markPaidDate').value=today();
   openModal('markPaidModal');
 }
 
@@ -1288,13 +1296,14 @@ async function confirmMarkPaid(accId){
 
   // 2. Create reimbursement transfer (not income — doesn't affect income/expense totals)
   const txCur=tx.currency||'MXN';
+  const paidDate=document.getElementById('markPaidDate').value||today();
   const trData={
     type:'reimbursement',
     to:accId,
     from:null,
     amount:person.amount,
     desc:'Reembolso: '+person.name+' - '+tx.ds,
-    d:today(),
+    d:paidDate,
     currency:txCur,
     toCurrency:txCur,
     fromCurrency:txCur,
