@@ -1,8 +1,10 @@
-const CACHE='finanzas-v10.10';
+const CACHE='finanzas-v10.11';
 const ASSETS=[
   './',
   './index.html',
   './manifest.json',
+  './icon-192.png',
+  './icon-512.png',
 ];
 
 self.addEventListener('install',e=>{
