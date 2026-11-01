@@ -744,6 +744,11 @@ async function loadAll(){
   S.budgets=snaps[6].exists?snaps[6].data():{};
   S.meta=snaps[7].exists?snaps[7].data():{};
   S.exchangeRates=snaps[8].exists?snaps[8].data():{};
+  // One-time fix (Nov 2026): October 2026 TC 18.07 → 18.81. Only fires while the old value is still there.
+  if(S.exchangeRates['2026-10']===18.07){
+    S.exchangeRates['2026-10']=18.81;
+    fsDoc('exchangeRates/main',{'2026-10':18.81});
+  }
   // Init month
   S.month=currentMonth();
   S.year=new Date().getFullYear();
@@ -804,6 +809,53 @@ function R(){
 // ═══════════════════════════════════════
 // RENDER: DASHBOARD
 // ═══════════════════════════════════════
+// Donut card used on Inicio for both expenses and income.
+// entries: [[categoryId, amountMXN], ...] sorted high to low; total: sum of amounts.
+function donutCard(title,centerLabel,entries,total){
+  let h=`<div class="card">
+    <div class="flex-between mb-8">
+      <div class="text-sm fw-600">${title}</div>
+      <div class="text-xs" style="color:var(--txt3)">${entries.length} categorías</div>
+    </div>
+    <div class="donut-container">
+      <svg width="160" height="160" viewBox="0 0 160 160">`;
+  const cx=80,cy=80,r=65,sw=20;
+  if(entries.length===1){
+    // A single category is a full ring (an arc that starts and ends at the same point draws nothing)
+    h+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${getCat(entries[0][0]).color}" stroke-width="${sw}"/>`;
+  } else if(entries.length>1){
+    let angle=-90;
+    entries.forEach(([cid,val])=>{
+      const cat=getCat(cid);
+      const sweep=Math.max((val/total)*360,1);
+      const rad1=angle*Math.PI/180;
+      const rad2=(angle+sweep)*Math.PI/180;
+      const x1=cx+r*Math.cos(rad1),y1=cy+r*Math.sin(rad1);
+      const x2=cx+r*Math.cos(rad2),y2=cy+r*Math.sin(rad2);
+      const large=sweep>180?1:0;
+      h+=`<path d="M${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2}" fill="none" stroke="${cat.color}" stroke-width="${sw}"/>`;
+      angle+=sweep;
+    });
+  } else {
+    h+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg3)" stroke-width="${sw}"/>`;
+  }
+  h+=`</svg>
+      <div class="donut-center"><div class="amount">${fmt(total)}</div><div class="label">${centerLabel}</div></div>
+    </div>
+    <div style="max-height:200px;overflow-y:auto">`;
+  entries.slice(0,10).forEach(([cid,val])=>{
+    const cat=getCat(cid);
+    const p=pct(val,total);
+    h+=`<div class="flex-between" style="padding:4px 0;font-size:.8rem">
+      <div class="flex gap-4" style="align-items:center"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${cat.color}"></span>${cat.emoji} ${cat.name}</div>
+      <div class="text-mono">${fmt(val)} <span class="text-xs" style="color:var(--txt3)">${p}%</span></div>
+    </div>`;
+  });
+  if(!entries.length) h+=`<div class="text-xs" style="color:var(--txt3);text-align:center;padding:6px 0">Sin movimientos este mes</div>`;
+  h+=`</div></div>`;
+  return h;
+}
+
 function renderDash(){
   const m=S.month;const pm=prevMonth(m);
   const txM=S.transactions.filter(t=>mk(t.d)===m);
@@ -921,49 +973,17 @@ function renderDash(){
 
   html+=`</div></div>
 
-  <!-- Donut Chart -->
-  <div class="card">
-    <div class="flex-between mb-8">
-      <div class="text-sm fw-600">Gastos por categoria</div>
-      <div class="text-xs" style="color:var(--txt3)">${catCount} categorías</div>
-    </div>
-    <div class="donut-container">
-      <svg width="160" height="160" viewBox="0 0 160 160">`;
+  `;
 
-  // Draw donut
-  if(catEntries.length>0){
-    let angle=-90;
-    const cx=80,cy=80,r=65,sw=20;
-    catEntries.forEach(([cid,val])=>{
-      const cat=getCat(cid);
-      const sweep=Math.max((val/totalExp)*360,1);
-      const rad1=angle*Math.PI/180;
-      const rad2=(angle+sweep)*Math.PI/180;
-      const x1=cx+r*Math.cos(rad1),y1=cy+r*Math.sin(rad1);
-      const x2=cx+r*Math.cos(rad2),y2=cy+r*Math.sin(rad2);
-      const large=sweep>180?1:0;
-      html+=`<path d="M${x1},${y1} A${r},${r} 0 ${large},1 ${x2},${y2}" fill="none" stroke="${cat.color}" stroke-width="${sw}"/>`;
-      angle+=sweep;
-    });
-  } else {
-    html+=`<circle cx="80" cy="80" r="65" fill="none" stroke="var(--bg3)" stroke-width="20"/>`;
-  }
-
-  html+=`</svg>
-      <div class="donut-center"><div class="amount">${fmt(totalExp)}</div><div class="label">Total gastos</div></div>
-    </div>
-    <div style="max-height:200px;overflow-y:auto">`;
-
-  catEntries.slice(0,10).forEach(([cid,val])=>{
-    const cat=getCat(cid);
-    const p=pct(val,totalExp);
-    html+=`<div class="flex-between" style="padding:4px 0;font-size:.8rem">
-      <div class="flex gap-4" style="align-items:center"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${cat.color}"></span>${cat.emoji} ${cat.name}</div>
-      <div class="text-mono">${fmt(val)} <span class="text-xs" style="color:var(--txt3)">${p}%</span></div>
-    </div>`;
+  // Donut charts: expenses, then income (same chart, percentages and totals per category)
+  html+=donutCard('Gastos por categoria','Total gastos',catEntries,totalExp);
+  const incTotals={};
+  txM.filter(t=>t.tp==='income').forEach(t=>{
+    incTotals[t.c]=(incTotals[t.c]||0)+txToMXN(t);
   });
-
-  html+=`</div></div>`;
+  const incEntries=Object.entries(incTotals).sort((a,b)=>b[1]-a[1]);
+  const totalIncCat=incEntries.reduce((s,e)=>s+e[1],0);
+  html+=donutCard('Ingresos por categoria','Total ingresos',incEntries,totalIncCat);
 
   // Goals preview
   if(S.goals.length){
