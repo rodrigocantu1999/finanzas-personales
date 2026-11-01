@@ -613,6 +613,7 @@ db.enablePersistence({synchronizeTabs:true}).catch(()=>{});
 let S={
   accounts:[],categories:[],transactions:[],transfers:[],debts:[],goals:[],budgets:{},
   exchangeRates:{},meta:{},
+  erUnlocked:{},
   month:'',year:0,
   currentTab:'tabInicio',
   movsTypeFilter:'all',movsAccFilter:'all',movsCatFilter:'all',
@@ -744,11 +745,6 @@ async function loadAll(){
   S.budgets=snaps[6].exists?snaps[6].data():{};
   S.meta=snaps[7].exists?snaps[7].data():{};
   S.exchangeRates=snaps[8].exists?snaps[8].data():{};
-  // One-time fix (Nov 2026): October 2026 TC 18.07 → 18.81. Only fires while the old value is still there.
-  if(S.exchangeRates['2026-10']===18.07){
-    S.exchangeRates['2026-10']=18.81;
-    fsDoc('exchangeRates/main',{'2026-10':18.81});
-  }
   // Init month
   S.month=currentMonth();
   S.year=new Date().getFullYear();
@@ -1797,12 +1793,23 @@ function renderAjustes(){
   monthsList.forEach(mo=>{
     const rate=S.exchangeRates[mo];
     const isCurrent=mo===cm;
-    const isLocked=!isCurrent&&rate;
+    // Past months with a rate are locked by default; the user can unlock one to edit it and lock it again.
+    const unlocked=!isCurrent&&rate&&S.erUnlocked[mo];
+    const isLocked=!isCurrent&&rate&&!unlocked;
+    let btns='';
+    if(isLocked){
+      btns=`<button class="btn btn-xs btn-outline" onclick="setERLock('${mo}',false)">🔓 Desbloquear</button>`;
+    } else if(unlocked){
+      btns=`<button class="btn btn-xs btn-primary" onclick="openERModal('${mo}')">Editar</button>
+        <button class="btn btn-xs btn-outline" onclick="setERLock('${mo}',true)">🔒 Bloquear</button>`;
+    } else {
+      btns=`<button class="btn btn-xs btn-primary" onclick="openERModal('${mo}')">Editar</button>`;
+    }
     html+=`<div class="er-item">
-      <div><span class="er-month">${monthName(mo)}</span>${isLocked?' 🔒':''}</div>
+      <div><span class="er-month">${monthName(mo)}</span>${isLocked?' 🔒':unlocked?' 🔓':''}</div>
       <div class="flex gap-8" style="align-items:center">
         <span class="er-rate">${rate?'$'+rate.toFixed(2):'Sin TC'}</span>
-        ${isCurrent||!rate?`<button class="btn btn-xs btn-primary" onclick="openERModal('${mo}')">Editar</button>`:''}
+        ${btns}
       </div>
     </div>`;
   });
@@ -2675,6 +2682,13 @@ async function confirmAction(){
 // ═══════════════════════════════════════
 // EXCHANGE RATE MODAL
 // ═══════════════════════════════════════
+// Unlocked past months live only while the app is open: reopening the app locks them all again.
+function setERLock(month,lock){
+  if(lock) delete S.erUnlocked[month];
+  else S.erUnlocked[month]=true;
+  R();
+}
+
 function openERModal(month){
   S.erMonth=month;
   document.getElementById('erMonthLabel').textContent=monthName(month);
