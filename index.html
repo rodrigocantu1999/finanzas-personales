@@ -1425,39 +1425,85 @@ async function confirmMarkPaid(accId){
   tx.shared.people[personIdx].paid=true;
   await fsUpdate('transactions',txId,{shared:tx.shared});
 
-  // 2. Create reimbursement transfer (not income — doesn't affect income/expense totals)
+  // 2. Split the payment: the part that gives back what you paid is a reimbursement (a transfer, not income);
+  //    anything beyond what you paid is income in "Otros ingresos".
   const txCur=tx.currency||'MXN';
   const paidDate=document.getElementById('markPaidDate').value||today();
-  const trData={
-    type:'reimbursement',
-    to:accId,
-    from:null,
-    amount:person.amount,
-    desc:'Reembolso: '+person.name+' - '+tx.ds,
-    d:paidDate,
-    currency:txCur,
-    toCurrency:txCur,
-    fromCurrency:txCur,
-  };
-  if(txCur==='USD'){
-    trData.toAmount=person.amount;
-    trData.fromAmount=person.amount;
-    trData.exchangeRate=getTC(currentMonth());
+  const split=splitSharedPayment(tx,personIdx);
+  if(split.reimb>0.004){
+    const trData={
+      type:'reimbursement',
+      to:accId,
+      from:null,
+      amount:split.reimb,
+      desc:'Reembolso: '+person.name+' - '+tx.ds,
+      d:paidDate,
+      currency:txCur,
+      toCurrency:txCur,
+      fromCurrency:txCur,
+      txId:txId,
+    };
+    if(txCur==='USD'){
+      trData.toAmount=split.reimb;
+      trData.fromAmount=split.reimb;
+      trData.exchangeRate=getTC(currentMonth());
+    }
+    const id=uid();
+    trData.id=id;
+    await fsSet('transfers',id,trData);
+    S.transfers.push(trData);
   }
-  const id=uid();
-  trData.id=id;
-  await fsSet('transfers',id,trData);
-  S.transfers.push(trData);
+  if(split.income>0.004){
+    const incData={
+      tp:'income',
+      a:split.income,
+      ds:'Excedente compartido: '+person.name+' - '+tx.ds,
+      c:otherIncomeCategoryId(),
+      acc:accId,
+      d:paidDate,
+      currency:txCur,
+      txId:txId,
+    };
+    if(txCur==='USD'){
+      incData.exchangeRate=getTC(mk(paidDate));
+      incData.amountMXN=split.income*incData.exchangeRate;
+    }
+    const id=uid();
+    incData.id=id;
+    await fsSet('transactions',id,incData);
+    S.transactions.push(incData);
+  }
 
   R();
+}
+
+// How much of person #personIdx's payment returns money you paid (reimbursement) and how much is extra (income).
+// Others together cover what you paid minus your share; payments fill that first, the rest is income.
+function splitSharedPayment(tx,personIdx){
+  const sh=tx.shared;
+  const amount=sh.people[personIdx].amount||0;
+  const cap=Math.max(0,(tx.a||0)-(sh.myShare||0));
+  const collected=sh.people.reduce((s,p,i)=>s+(i!==personIdx&&p.paid?p.amount||0:0),0);
+  const reimb=Math.round(Math.min(amount,Math.max(0,cap-collected))*100)/100;
+  return {reimb,income:Math.round((amount-reimb)*100)/100};
+}
+function otherIncomeCategoryId(){
+  const c=S.categories.find(c=>c.type==='income'&&c.name.trim().toLowerCase()==='otros ingresos')
+    ||S.categories.find(c=>c.type==='income'&&c.id==='other_inc')
+    ||S.categories.find(c=>c.type==='income');
+  return c?c.id:'other_inc';
 }
 
 async function absorbShare(txId,personIdx){
   const tx=S.transactions.find(t=>t.id===txId);
   if(!tx||!tx.shared) return;
   tx.shared.people[personIdx].absorbed=true;
-  // Add their amount to myShare
-  tx.shared.myShare=(tx.shared.myShare||0)+tx.shared.people[personIdx].amount;
+  // Their amount first cancels any excess (money you'd have earned on top), the rest becomes your cost
+  const amt=tx.shared.people[personIdx].amount||0;
+  const excess=tx.shared.excess||0;
+  const fromExcess=Math.min(excess,amt);
+  tx.shared.excess=Math.round((excess-fromExcess)*100)/100;
+  tx.shared.myShare=Math.round(((tx.shared.myShare||0)+amt-fromExcess)*100)/100;
   await fsUpdate('transactions',txId,{shared:tx.shared});
   R();
 }
@@ -2143,10 +2189,15 @@ function updateSharedSummary(){
     myShare=total-othersTotal;
   }
   const owed=S.sharedPeople.reduce((s,p)=>s+p.amount,0);
+  // If they owe you more than you paid, your share is $0 and the difference is income once they pay
+  const excess=Math.max(0,-myShare);
+  myShare=Math.max(0,myShare);
   document.getElementById('txSharedSummary').innerHTML=
     `<div class="card" style="padding:10px;background:var(--bg3)">
       <div class="flex-between text-sm"><span>Tu parte:</span><span class="text-mono fw-600">${fmt(myShare)}</span></div>
       <div class="flex-between text-sm"><span>Te deben:</span><span class="text-mono fw-600 text-green">${fmt(owed)}</span></div>
+      ${excess>0.004?`<div class="flex-between text-sm"><span>Excedente:</span><span class="text-mono fw-600 text-green">${fmt(excess)}</span></div>
+      <div class="text-xs" style="color:var(--txt3);margin-top:4px">Te deben más de lo que pagaste. Al cobrar, lo que pase de ${fmt(total)} entra como ingreso en "Otros ingresos".</div>`:''}
     </div>`;
 }
 
@@ -2198,10 +2249,14 @@ async function saveTx(){
     } else {
       myShare=total-S.sharedPeople.reduce((s,p)=>s+p.amount,0);
     }
+    // Owed more than paid: your share is $0, the rest is kept as "excess" and becomes income when collected
+    const excess=Math.max(0,-myShare);
+    myShare=Math.max(0,myShare);
     data.shared={
       enabled:true,
       mode:S.sharedMode,
       total:total,
+      excess:Math.round(excess*100)/100,
       myShare:Math.round(myShare*100)/100,
       people:S.sharedPeople.filter(p=>p.name.trim()).map(p=>({
         name:p.name.trim(),
