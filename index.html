@@ -496,9 +496,31 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
   <input type="hidden" id="budCatId">
   <div class="form-group"><div id="budCatName" class="fw-600 mb-8">Categoria</div></div>
   <div class="form-group"><label>Monto mensual</label><input type="number" id="budAmount" inputmode="decimal" step="0.01"></div>
+  <div class="text-xs" id="budNote" style="color:var(--txt3)"></div>
   <div style="margin-top:16px;display:flex;gap:8px">
     <button class="btn btn-primary" style="flex:1" onclick="saveBudget()">Guardar</button>
     <button class="btn btn-danger" id="budDeleteBtn" style="display:none" onclick="deleteBudget()">Borrar</button>
+  </div>
+</div>
+</div>
+
+<!-- Provision Modal -->
+<div class="modal-overlay" id="provModal">
+<div class="modal">
+  <div class="modal-title"><span id="provModalTitle">Nueva provisión</span><button class="modal-close" onclick="closeModal('provModal')">&times;</button></div>
+  <input type="hidden" id="provEditId">
+  <div class="form-group"><label>Nombre</label><input type="text" id="provName" placeholder="Servicio del carro"></div>
+  <div class="form-group"><label>Cajita donde lo apartas</label><select id="provAcc"></select></div>
+  <div class="form-group"><label>Categoría del gasto que cubre</label><select id="provCat"></select></div>
+  <div class="grid-2" style="gap:10px">
+    <div class="form-group"><label>Costo total ($)</label><input type="number" id="provTarget" inputmode="decimal" step="0.01" oninput="updateProvHint()"></div>
+    <div class="form-group"><label>Cada cuántos meses</label><input type="number" id="provEvery" inputmode="numeric" min="1" step="1" value="6" oninput="updateProvHint()"></div>
+  </div>
+  <div class="form-group"><label>Próximo mes de pago</label><input type="month" id="provDue"></div>
+  <div class="text-xs mb-8" id="provHint" style="color:var(--txt2)"></div>
+  <div style="margin-top:8px;display:flex;gap:8px">
+    <button class="btn btn-primary" style="flex:1" onclick="saveProv()">Guardar</button>
+    <button class="btn btn-danger" id="provDeleteBtn" style="display:none" onclick="deleteProv()">Borrar</button>
   </div>
 </div>
 </div>
@@ -616,6 +638,7 @@ db.enablePersistence({synchronizeTabs:true}).catch(()=>{});
 // ═══════════════════════════════════════
 let S={
   accounts:[],categories:[],transactions:[],transfers:[],debts:[],goals:[],budgets:{},
+  budgetMonths:{},provisions:[],
   exchangeRates:{},meta:{},
   erUnlocked:{},
   scope:(()=>{try{return localStorage.getItem('scope')||'all'}catch(e){return 'all'}})(),
@@ -745,6 +768,80 @@ function scopeSummaryHTML(txs,title){
     ${row('Total',totInc,totExp,true)}
     ${salaryBarHTML(t['8a5'].inc,t['8a5'].exp)}
   </div>`;
+}
+
+// ── Per-month budgets ──
+// Each month can have its own budget (collection budgetMonths, doc id 'YYYY-MM': {items:{catId:amount}, confirmed}).
+// A month without one copies the closest earlier month that has one; before any, the original budget (budgets/main).
+function monthDiff(a,b){const[ya,ma]=a.split('-').map(Number),[yb,mb]=b.split('-').map(Number);return (yb-ya)*12+(mb-ma)} // b − a in months
+function addMonths(m,n){let[y,mo]=m.split('-').map(Number);mo+=n;y+=Math.floor((mo-1)/12);mo=((mo-1)%12+12)%12+1;return y+'-'+String(mo).padStart(2,'0')}
+function budgetSourceMonth(m){
+  if(S.budgetMonths[m]) return m;
+  let best=null;
+  Object.keys(S.budgetMonths).forEach(k=>{if(k<m&&(!best||k>best)) best=k});
+  return best; // null = original budget
+}
+function budgetsFor(m){
+  const src=budgetSourceMonth(m);
+  const items=src?(S.budgetMonths[src].items||{}):S.budgets;
+  const out={};
+  Object.entries(items||{}).forEach(([cid,a])=>{if(a>0&&S.categories.some(c=>c.id===cid)) out[cid]=a});
+  return out;
+}
+// Save month m's budget. Months after m up to today that had no budget of their own are frozen first,
+// so changing a past month never changes the months that followed it. Months after today keep copying.
+function writeBudgetMonth(m,items,confirmed){
+  const cm=currentMonth();
+  const freezes=[];
+  for(let x=addMonths(m,1);x<=cm;x=addMonths(x,1)){
+    if(!S.budgetMonths[x]) freezes.push([x,{items:budgetsFor(x),confirmed:true}]);
+  }
+  freezes.forEach(([k,v])=>{S.budgetMonths[k]=v});
+  S.budgetMonths[m]={items:{...items},confirmed:confirmed!==false};
+  // Not awaited (offline-safe); set() replaces the whole doc so removed categories really disappear
+  [...freezes,[m,S.budgetMonths[m]]].forEach(([k,v])=>db.collection('budgetMonths').doc(k).set(v).catch(e=>console.error('budget save',e)));
+}
+
+// ── Provisions: money set aside every month in a savings account for a cost that comes every N months ──
+// {name, accId: savings account, catId: expense category it pays, target: cost, every: months, dueMonth: 'YYYY-MM', startMonth}
+function provMonthly(p){return (p.target||0)/Math.max(1,p.every||1)}
+function provActive(p,m){return !p.startMonth||p.startMonth<=m}
+function provDueMonth(p,m){ // next payment month on or after m
+  let d=p.dueMonth||m;const ev=Math.max(1,p.every||1);
+  if(d<m) d=addMonths(d,Math.ceil(monthDiff(d,m)/ev)*ev);
+  return d;
+}
+function trIn(t){return t.toCurrency&&t.fromCurrency!==t.toCurrency?(t.toAmount||t.amount):t.amount}
+function trOut(t){return t.fromCurrency&&t.fromCurrency!==t.toCurrency?(t.fromAmount||t.amount):t.amount}
+function provStatus(p,m){
+  const monthly=provMonthly(p);
+  // Set aside this month = transfers into the savings account
+  const contributed=S.transfers.filter(t=>t.to===p.accId&&t.from!==p.accId&&mk(t.d)===m).reduce((s,t)=>s+trIn(t),0);
+  // Taken out this month = transfers out of it + expenses paid straight from it
+  const out=S.transfers.filter(t=>t.from===p.accId&&mk(t.d)===m).reduce((s,t)=>s+trOut(t),0)
+    +S.transactions.filter(t=>t.tp==='expense'&&t.acc===p.accId&&mk(t.d)===m).reduce((s,t)=>s+t.a,0);
+  const catSpent=S.transactions.filter(t=>t.tp==='expense'&&t.c===p.catId&&mk(t.d)===m).reduce((s,t)=>s+realExpenseMXN(t),0);
+  const due=provDueMonth(p,m);
+  return {monthly,contributed,done:Math.min(contributed,monthly),out,catSpent,covered:Math.min(catSpent,out),
+    saved:calcAccBalance(p.accId),due,isDue:due===m,monthsLeft:monthDiff(m,due)};
+}
+// Everything the budget screens need for month m (scope: 'all' or an ámbito id)
+function budgetStatus(m,scope){
+  scope=scope||'all';
+  const inSc=cid=>scope==='all'||catScope(cid)===scope;
+  const spentRaw={};
+  S.transactions.forEach(t=>{if(t.tp==='expense'&&mk(t.d)===m&&(scope==='all'||txScope(t)===scope)) spentRaw[t.c]=(spentRaw[t.c]||0)+realExpenseMXN(t)});
+  const provs=S.provisions.filter(p=>provActive(p,m)&&inSc(p.catId)).map(p=>({p,...provStatus(p,m)}));
+  // Spending covered by a provision (money taken out of its savings account) doesn't count against the budget
+  const covered={};
+  provs.forEach(x=>{covered[x.p.catId]=Math.min(spentRaw[x.p.catId]||0,(covered[x.p.catId]||0)+x.covered)});
+  const spent={};
+  Object.keys(spentRaw).forEach(cid=>{spent[cid]=spentRaw[cid]-(covered[cid]||0)});
+  const items=budgetsFor(m);
+  const entries=Object.entries(items).filter(([cid])=>inSc(cid)).map(([cid,b])=>({cid,budget:b,spent:spent[cid]||0,covered:covered[cid]||0}));
+  const catTotal=entries.reduce((s,e)=>s+e.budget,0),catUsed=entries.reduce((s,e)=>s+e.spent,0);
+  const provTotal=provs.reduce((s,x)=>s+x.monthly,0),provUsed=provs.reduce((s,x)=>s+x.done,0);
+  return {items,entries,provs,spent,covered,total:catTotal+provTotal,used:catUsed+provUsed};
 }
 
 // ── Usage-based ordering ──
@@ -908,6 +1005,9 @@ async function loadAll(){
     db.doc('budgets/main').get(),
     db.doc('meta/status').get(),
     db.doc('exchangeRates/main').get(),
+    // Newer collections: if they can't be read, the rest of the app still loads
+    db.collection('budgetMonths').get().catch(e=>{console.error('budgetMonths',e);return {docs:[]}}),
+    db.collection('provisions').get().catch(e=>{console.error('provisions',e);return {docs:[]}}),
   ]);
   S.transactions=snaps[0].docs.map(d=>({id:d.id,...d.data()}));
   S.transfers=snaps[1].docs.map(d=>({id:d.id,...d.data()}));
@@ -918,6 +1018,10 @@ async function loadAll(){
   S.budgets=snaps[6].exists?snaps[6].data():{};
   S.meta=snaps[7].exists?snaps[7].data():{};
   S.exchangeRates=snaps[8].exists?snaps[8].data():{};
+  // Per-month budgets: one doc per month ('2026-11' → {items:{catId:amount}, confirmed})
+  S.budgetMonths={};
+  snaps[9].docs.forEach(d=>{S.budgetMonths[d.id]=d.data()});
+  S.provisions=snaps[10].docs.map(d=>({id:d.id,...d.data()}));
   // Init month
   S.month=currentMonth();
   S.year=new Date().getFullYear();
@@ -1074,12 +1178,9 @@ function renderDash(){
   const pmName=monthName(pm).split(' ')[0];
 
   // Budget summary
-  let budTotal=0,budSpent=0;
-  Object.entries(S.budgets).forEach(([cid,amt])=>{
-    if(S.scope!=='all'&&catScope(cid)!==S.scope) return;
-    budTotal+=amt;
-    txM.filter(t=>t.tp==='expense'&&t.c===cid).forEach(t=>{budSpent+=realExpenseMXN(t)});
-  });
+  // This month's budget (categories + provisions), following the ámbito selector
+  const bs=budgetStatus(m,S.scope);
+  const budTotal=bs.total,budSpent=bs.used;
   const budAvail=budTotal-budSpent;
   const budPct=pct(budSpent,budTotal);
 
@@ -1093,7 +1194,7 @@ function renderDash(){
   const totalExp=catEntries.reduce((s,e)=>s+e[1],0);
   const catCount=catEntries.length;
 
-  let html=scopeSelectorHTML()+(S.scope==='all'?scopeSummaryHTML(txMAll,'Por ámbito · '+monthName(m)):'')+`
+  let html=newMonthBudgetBanner(m)+scopeSelectorHTML()+(S.scope==='all'?scopeSummaryHTML(txMAll,'Por ámbito · '+monthName(m)):'')+`
   <!-- Hero Balance Card -->
   <div class="hero-card">
     <div class="hero-label">Balance de ${monthName(m)}${S.scope!=='all'?' · '+scopeName(S.scope):''}</div>
@@ -1675,36 +1776,20 @@ function renderCuentas(){
 // ═══════════════════════════════════════
 function renderPresup(){
   const m=S.month;
-  const txM=S.transactions.filter(t=>t.tp==='expense'&&mk(t.d)===m);
+  const bs=budgetStatus(m,'all');
+  const src=budgetSourceMonth(m);
+  const budAvail=bs.total-bs.used;
+  const budP=pct(bs.used,bs.total);
+  const barCol=p=>p>100?'var(--red)':p>80?'var(--yellow)':'var(--green)';
 
-  // Calculate per-category spending
-  const spent={};
-  txM.forEach(tx=>{
-    const real=realExpenseMXN(tx);
-    spent[tx.c]=(spent[tx.c]||0)+real;
-  });
-
-  let budTotal=0,budSpent=0;
-  const budgetEntries=[];
-  Object.entries(S.budgets).forEach(([cid,amt])=>{
-    const s=spent[cid]||0;
-    budTotal+=amt;
-    budSpent+=s;
-    const cat=getCat(cid);
-    budgetEntries.push({cid,cat,budget:amt,spent:s,pct:pct(s,amt)});
-  });
-  budgetEntries.sort((a,b)=>b.pct-a.pct);
-
-  const budAvail=budTotal-budSpent;
-  const budP=pct(budSpent,budTotal);
-
-  let html=`<div class="hero-card">
+  let html=newMonthBudgetBanner(m,true)+`<div class="hero-card">
     <div class="hero-label">Presupuesto de ${monthName(m)}</div>
-    <div class="hero-amount">${fmt(budTotal)}</div>
+    <div class="hero-amount">${fmt(bs.total)}</div>
+    <div style="font-size:.7rem;opacity:.85">${S.budgetMonths[m]?'Presupuesto propio de este mes':'Copiado de '+(src?monthName(src):'tu presupuesto original')} · incluye provisiones</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
       <div class="sub-card">
-        <div class="sub-label">GASTADO</div>
-        <div class="sub-value">${fmt(budSpent)}</div>
+        <div class="sub-label">GASTADO + APARTADO</div>
+        <div class="sub-value">${fmt(bs.used)}</div>
       </div>
       <div class="sub-card">
         <div class="sub-label">${budAvail>=0?'DISPONIBLE':'EXCEDIDO'}</div>
@@ -1717,31 +1802,50 @@ function renderPresup(){
     </div>
   </div>`;
 
-  // Per category
-  budgetEntries.forEach(({cid,cat,budget,spent:s,pct:p})=>{
+  // Provisions
+  html+=`<div class="section-header"><span>PROVISIONES</span><button class="btn btn-xs btn-primary" onclick="openProvModal()">+ Provisión</button></div>`;
+  if(!bs.provs.length){
+    html+=`<div class="card text-xs" style="color:var(--txt2);line-height:1.5">Para gastos que no son mensuales (servicio del carro, refrendo, regalos de diciembre): apartas una parte cada mes en una cajita y, cuando toca pagar, el gasto sale de ahí sin desbalancear tu presupuesto.</div>`;
+  }
+  bs.provs.forEach(x=>{
+    const p=x.p,acc=getAcc(p.accId),cat=getCat(p.catId);
+    const pm=pct(x.done,x.monthly),ps=pct(x.saved,p.target);
+    html+=`<div class="card pointer" style="padding:12px 16px;${x.isDue?'border:2px solid var(--accent)':''}" onclick="openProvModal('${p.id}')">
+      <div class="flex-between">
+        <div class="flex gap-8" style="align-items:center"><span>${cat.emoji}</span><span class="text-sm fw-500">${p.name}</span></div>
+        <div class="badge ${pm>=100?'badge-green':'badge-yellow'}">${pm>=100?'Apartado':pm+'%'}</div>
+      </div>
+      <div class="text-xs mt-4" style="color:var(--txt2)">Apartar este mes ${fmt(x.monthly)} · llevas ${fmt(x.contributed)} en ${acc.icon} ${acc.name}</div>
+      <div class="progress mt-4"><div class="progress-bar" style="width:${Math.min(pm,100)}%;background:${pm>=100?'var(--green)':'var(--yellow)'}"></div></div>
+      <div class="flex-between mt-4 text-xs" style="color:var(--txt2)">
+        <span>En la cajita: ${fmt(x.saved)} de ${fmt(p.target)} (${ps}%)</span>
+        <span>${x.isDue?'<b style="color:var(--accent)">Toca pagar este mes</b>':'Pago: '+monthName(x.due)+' ('+x.monthsLeft+(x.monthsLeft===1?' mes':' meses')+')'}</span>
+      </div>
+      ${x.catSpent>0?`<div class="text-xs mt-4" style="color:var(--txt2)">${cat.name} este mes: ${fmt(x.catSpent)} · cubierto con la cajita ${fmt(x.covered)}${x.catSpent-x.covered>0.5?' · <span style="color:var(--red)">sin cubrir '+fmt(x.catSpent-x.covered)+'</span>':''}</div>`:''}
+    </div>`;
+  });
+
+  // Category budgets
+  const entries=bs.entries.map(e=>({...e,pct:pct(e.spent,e.budget)})).sort((a,b)=>b.pct-a.pct);
+  if(entries.length) html+=`<div class="section-header"><span>CATEGORÍAS</span><span class="text-mono">${fmt(entries.reduce((s,e)=>s+e.spent,0))} / ${fmt(entries.reduce((s,e)=>s+e.budget,0))}</span></div>`;
+  entries.forEach(({cid,budget,spent:s,covered,pct:p})=>{
+    const cat=getCat(cid);
     html+=`<div class="card pointer" style="padding:12px 16px" onclick="openBudgetModal('${cid}')">
       <div class="flex-between">
         <div class="flex gap-8" style="align-items:center"><span>${cat.emoji}</span><span class="text-sm fw-500">${cat.name}</span></div>
         <div class="badge ${p>100?'badge-red':p>80?'badge-yellow':'badge-green'}">${p}%</div>
       </div>
-      <div class="progress mt-4"><div class="progress-bar" style="width:${Math.min(p,100)}%;background:${p>100?'var(--red)':p>80?'var(--yellow)':'var(--green)'}"></div></div>
+      <div class="progress mt-4"><div class="progress-bar" style="width:${Math.min(p,100)}%;background:${barCol(p)}"></div></div>
       <div class="flex-between mt-4">
         <span class="text-xs" style="color:var(--txt2)">${fmt(s)} / ${fmt(budget)}</span>
         <span class="text-xs fw-600" style="color:${s<=budget?'var(--green)':'var(--red)'}">${s>budget?'Excedido '+fmt(s-budget):'Disponible '+fmt(budget-s)}</span>
       </div>
+      ${covered>0?`<div class="text-xs mt-4" style="color:var(--txt3)">No cuenta ${fmt(covered)} que se pagó con provisión</div>`:''}
     </div>`;
   });
 
-  // Expenses without budget
-  const catIdsWithBudget=new Set(Object.keys(S.budgets));
-  const noBudget={};
-  txM.forEach(tx=>{
-    if(!catIdsWithBudget.has(tx.c)){
-      noBudget[tx.c]=(noBudget[tx.c]||0)+realExpenseMXN(tx);
-    }
-  });
-  const noBudgetEntries=Object.entries(noBudget).sort((a,b)=>b[1]-a[1]);
-
+  // Spending in categories with no budget this month
+  const noBudgetEntries=Object.entries(bs.spent).filter(([cid,v])=>!bs.items[cid]&&v>0.004).sort((a,b)=>b[1]-a[1]);
   if(noBudgetEntries.length){
     html+=`<div class="section-header"><span>SIN PRESUPUESTO</span><span class="text-mono text-red">${fmt(noBudgetEntries.reduce((s,e)=>s+e[1],0))}</span></div>`;
     noBudgetEntries.forEach(([cid,amt])=>{
@@ -2014,8 +2118,7 @@ function renderAnalisis(){
 
   // Budget overruns
   const overruns=[];
-  Object.entries(S.budgets).forEach(([cid,amt])=>{
-    const s=txM.filter(t=>t.tp==='expense'&&t.c===cid).reduce((sum,t)=>sum+realExpenseMXN(t),0);
+  budgetStatus(m,S.scope).entries.forEach(({cid,budget:amt,spent:s})=>{
     if(s>amt) overruns.push({cat:getCat(cid),over:s-amt,pct:Math.round(s/amt*100)});
   });
   overruns.forEach(o=>{
@@ -2762,7 +2865,8 @@ async function directDeleteCat(catId){
   // Remove budget if exists
   if(S.budgets[catId]){
     delete S.budgets[catId];
-    await fsDoc('budgets/main',S.budgets);
+    // set() without merge: with merge the deleted key stayed in Firestore and came back on reload
+    await db.doc('budgets/main').set(S.budgets);
   }
   R();
 }
@@ -2795,32 +2899,117 @@ async function deleteUnusedCats(){
 // ═══════════════════════════════════════
 // BUDGET MODAL
 // ═══════════════════════════════════════
+// Budget of one category, for the month being viewed only (later months copy it; earlier months don't change)
 function openBudgetModal(catId){
   const cat=getCat(catId);
-  const existing=S.budgets[catId];
+  const existing=budgetsFor(S.month)[catId];
   document.getElementById('budCatId').value=catId;
   document.getElementById('budCatName').textContent=`${cat.emoji} ${cat.name}`;
   document.getElementById('budAmount').value=existing||'';
   document.getElementById('budDeleteBtn').style.display=existing?'block':'none';
+  document.getElementById('budNote').textContent=`Cambia solo ${monthName(S.month)}. Los meses siguientes copian este; los anteriores no cambian.`;
   openModal('budModal');
 }
 
-async function saveBudget(){
+function saveBudget(){
   const catId=document.getElementById('budCatId').value;
   const amt=parseFloat(document.getElementById('budAmount').value);
   if(!amt||amt<=0){alert('Ingresa un monto valido');return}
-  S.budgets[catId]=amt;
-  await fsDoc('budgets/main',S.budgets);
+  writeBudgetMonth(S.month,{...budgetsFor(S.month),[catId]:amt},true);
   closeModal('budModal');
   R();
 }
 
-async function deleteBudget(){
+function deleteBudget(){
   const catId=document.getElementById('budCatId').value;
-  if(!confirm('¿Eliminar este presupuesto?')) return;
-  delete S.budgets[catId];
-  await fsDoc('budgets/main',S.budgets);
+  if(!confirm(`¿Quitar este presupuesto de ${monthName(S.month)} en adelante?`)) return;
+  const items={...budgetsFor(S.month)};
+  delete items[catId];
+  writeBudgetMonth(S.month,items,true);
   closeModal('budModal');
+  R();
+}
+
+// Start-of-month notice: keep last month's budget as is, or go adjust it. Shown until answered.
+function newMonthBudgetBanner(m,inPresup){
+  if(m!==currentMonth()) return '';
+  const bm=S.budgetMonths[m];
+  if(bm&&bm.confirmed) return '';
+  const tot=Object.values(budgetsFor(m)).reduce((s,a)=>s+a,0);
+  const due=S.provisions.filter(p=>provActive(p,m)&&provDueMonth(p,m)===m);
+  return `<div class="card" style="border:2px solid var(--accent)">
+    <div class="text-sm fw-600">Nuevo mes: ${monthName(m)}</div>
+    <div class="text-xs mt-4" style="color:var(--txt2)">Tu presupuesto de categorías es igual al de ${monthName(prevMonth(m))}: <b>${fmt(tot)}</b>.${inPresup?' Toca una categoría para cambiarla solo en este mes.':''}</div>
+    ${due.length?`<div class="text-xs mt-4">Este mes toca pagar: ${due.map(p=>`<b>${p.name}</b> (${fmt(p.target)})`).join(', ')}</div>`:''}
+    <div class="flex gap-8 mt-8">
+      <button class="btn btn-sm btn-primary" style="flex:1" onclick="confirmMonthBudget()">Dejar igual</button>
+      ${inPresup?'':`<button class="btn btn-sm btn-outline" style="flex:1" onclick="switchTab('tabPresup')">Ajustar</button>`}
+    </div>
+  </div>`;
+}
+function confirmMonthBudget(){
+  writeBudgetMonth(S.month,budgetsFor(S.month),true);
+  R();
+}
+
+// ═══════════════════════════════════════
+// PROVISION MODAL
+// ═══════════════════════════════════════
+function openProvModal(editId){
+  const p=editId?S.provisions.find(x=>x.id===editId):null;
+  document.getElementById('provModalTitle').textContent=p?'Editar provisión':'Nueva provisión';
+  document.getElementById('provEditId').value=editId||'';
+  document.getElementById('provDeleteBtn').style.display=p?'block':'none';
+  document.getElementById('provName').value=p?p.name:'';
+  // Savings accounts first, then the rest by use
+  const accs=accountsByUse();
+  const sorted=[...accs.filter(a=>a.type==='savings'),...accs.filter(a=>a.type!=='savings')];
+  document.getElementById('provAcc').innerHTML=sorted.map(a=>`<option value="${a.id}">${a.icon} ${a.name}</option>`).join('');
+  document.getElementById('provCat').innerHTML=categoriesByUse('expense').map(c=>`<option value="${c.id}">${c.emoji} ${c.name}</option>`).join('');
+  if(p){document.getElementById('provAcc').value=p.accId;document.getElementById('provCat').value=p.catId;}
+  document.getElementById('provTarget').value=p?p.target:'';
+  document.getElementById('provEvery').value=p?p.every:6;
+  document.getElementById('provDue').value=p?provDueMonth(p,currentMonth()):addMonths(currentMonth(),6);
+  updateProvHint();
+  openModal('provModal');
+}
+function updateProvHint(){
+  const t=parseFloat(document.getElementById('provTarget').value)||0;
+  const e=Math.max(1,parseInt(document.getElementById('provEvery').value)||1);
+  document.getElementById('provHint').innerHTML=t?`Apartarás <b>${fmt(t/e)}</b> cada mes. Esa cantidad entra en tu presupuesto mensual; cuando pagues desde la cajita (o pases el dinero de la cajita a otra cuenta ese mes), el gasto no cuenta contra tu presupuesto.`:'';
+}
+function saveProv(){
+  const editId=document.getElementById('provEditId').value;
+  const data={
+    name:document.getElementById('provName').value.trim(),
+    accId:document.getElementById('provAcc').value,
+    catId:document.getElementById('provCat').value,
+    target:parseFloat(document.getElementById('provTarget').value)||0,
+    every:Math.max(1,parseInt(document.getElementById('provEvery').value)||1),
+    dueMonth:document.getElementById('provDue').value,
+  };
+  if(!data.name){alert('Ponle un nombre');return}
+  if(!data.target){alert('Ingresa el costo total');return}
+  if(!/^\d{4}-\d{2}$/.test(data.dueMonth)){alert('Elige el próximo mes de pago');return}
+  if(editId){
+    const i=S.provisions.findIndex(x=>x.id===editId);
+    S.provisions[i]={...S.provisions[i],...data};
+    db.collection('provisions').doc(editId).set(S.provisions[i]).catch(e=>console.error('prov save',e));
+  } else {
+    data.startMonth=currentMonth(); // only counts from now on; past budgets don't change
+    const id=uid();
+    S.provisions.push({id,...data});
+    db.collection('provisions').doc(id).set(data).catch(e=>console.error('prov save',e));
+  }
+  closeModal('provModal');
+  R();
+}
+function deleteProv(){
+  const id=document.getElementById('provEditId').value;
+  if(!id||!confirm('¿Borrar esta provisión? Tu cajita y sus movimientos no cambian.')) return;
+  S.provisions=S.provisions.filter(x=>x.id!==id);
+  db.collection('provisions').doc(id).delete().catch(e=>console.error('prov delete',e));
+  closeModal('provModal');
   R();
 }
 
@@ -3036,6 +3225,8 @@ function exportJSON(){
     transactions:S.transactions,
     transfers:S.transfers,
     budgets:S.budgets,
+    budgetMonths:S.budgetMonths,
+    provisions:S.provisions,
     goals:S.goals,
     debts:S.debts,
     exchangeRates:S.exchangeRates,
@@ -3078,7 +3269,7 @@ function exportCSV(){
 // DELETE ALL DATA
 // ═══════════════════════════════════════
 async function deleteAllData(){
-  const collections=['transactions','transfers','accounts','categories','goals','debts'];
+  const collections=['transactions','transfers','accounts','categories','goals','debts','budgetMonths','provisions'];
   for(const col of collections){
     const snap=await db.collection(col).get();
     const batch=db.batch();
@@ -3088,7 +3279,7 @@ async function deleteAllData(){
   await db.doc('budgets/main').delete();
   await db.doc('exchangeRates/main').delete();
   S.transactions=[];S.transfers=[];S.accounts=[];S.categories=[];S.goals=[];S.debts=[];
-  S.budgets={};S.exchangeRates={};
+  S.budgets={};S.exchangeRates={};S.budgetMonths={};S.provisions=[];
   R();
   alert('Todos los datos han sido eliminados');
 }
@@ -3145,6 +3336,11 @@ async function runMigration(){
     // Budgets
     S.budgets=d.budgets||{};
     await fsDoc('budgets/main',S.budgets);
+    // Per-month budgets and provisions (backups made before Nov 2026 don't have them)
+    S.budgetMonths=d.budgetMonths||{};
+    for(const [k,v] of Object.entries(S.budgetMonths)) await db.collection('budgetMonths').doc(k).set(v);
+    S.provisions=d.provisions||[];
+    for(const p of S.provisions){const {id,...rest}=p;await db.collection('provisions').doc(id).set(rest);}
 
     // Goals
     for(const g of (d.goals||[])){
