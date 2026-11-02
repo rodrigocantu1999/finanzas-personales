@@ -3660,10 +3660,9 @@ const FIX3_ITEMS=[
   {tr:'tr_mscxkboghcil',person:'Rober',alloc:[['mskwtguug9n3',632]]},                                 // estadio
   {tr:'tr_mscxyjolo565',person:'Papá',alloc:[['mscxukl0kfzw',800]]},                                  // pago de notas
   {tr:'tr_mscyc584896n',person:'Diana',alloc:[['mskx4iqq8yc6',1210],['mskvlduy38k4',192]]},           // gastos diana + mitad del cine
-  {tr:'tr_mobwb8krk4vd',person:'Mamá',alloc:[['moqy5fshv5vy',3440]]},                                // 23 abr: mamá paid the GDL flight in cash
 ];
 const FIX3_MARTITA='tr_mscxt6ul2z2w'; // 29 jun $517: Martita bought stickers → income, not a reimbursement
-// Mamá also paid the GDL flight in two more parts that were entered as income: they become reimbursements of the flight
+// Mamá paid her part of the GDL flight in two parts that were entered as income: they become reimbursements of the flight
 const FIX3_GDL_FLIGHT='moqy5fshv5vy';
 const FIX3_GDL_INCOMES=['moqy4j21oeuk','moqxiwwkxjri']; // 3 may $2,000 cash, 4 may $1,420 NU
 function fixCierrePlan(){
@@ -3687,11 +3686,11 @@ function fixCierrePlan(){
       ops.push({k:'delTx',id:t.id});
       ops.push({k:'addTr',id:'fx3_gdl_'+t.id,data:{from:null,to:t.acc,type:'reimbursement',amount:t.a,d:t.d,desc:'Reembolso: Mamá - Vuelo gdl',txId:fl.id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
     });
-    const mama=3440+gi.reduce((x,t)=>x+t.a,0);
-    const op=ops.find(o=>o.k==='updTx'&&o.id===fl.id);
-    if(op) op.data={shared:{enabled:true,mode:'custom',total:fl.a,myShare:Math.round((fl.a-mama)*100)/100,excess:0,
-      people:[{name:'Mamá',amount:mama,paidAmount:mama,paid:true,absorbed:false}]}};
-    notes.push(`Vuelo a Guadalajara (${fmt(fl.a)}): tu mamá pagó ${fmt(mama)} en tres partes (23 abr, 3 may y 4 may); tu parte queda en ${fmt(fl.a-mama)}.`);
+    const mama=gi.reduce((x,t)=>x+t.a,0);
+    if(fl.shared&&fl.shared.enabled) errors.push('El vuelo a Guadalajara ya es compartido');
+    ops.push({k:'updTx',id:fl.id,data:{shared:{enabled:true,mode:'custom',total:fl.a,myShare:Math.round((fl.a-mama)*100)/100,excess:0,
+      people:[{name:'Mamá',amount:mama,paidAmount:mama,paid:true,absorbed:false}]}}});
+    notes.push(`Vuelo a Guadalajara (${fmt(fl.a)}): tu mamá pagó ${fmt(mama)} en dos partes (3 y 4 may); tu parte queda en ${fmt(fl.a-mama)}.`);
   }
   // Close the pouch, working on a copy that already has the steps above
   const st=fixApplyLocal({transactions:JSON.parse(JSON.stringify(S.transactions)),transfers:JSON.parse(JSON.stringify(S.transfers)),accounts:JSON.parse(JSON.stringify(S.accounts))},ops.filter(o=>o.k!=='updAcc'));
@@ -3724,7 +3723,7 @@ function fixCierrePlan(){
     }
   });
   if(Math.abs(left)>0.5) notes.push(`Ojo: en la bolsa quedaban ${fmt(left)} sin explicar; se ajustan para que quede en $0.`);
-  notes.push(`Se borran ${Math.round(fake)>0?'los "ingresos" de 2002–2003 ('+fmt(fake)+')':'0 movimientos viejos'} y ${moved} ajustes entre la bolsa y tus cuentas (incluye los $3,930 del 8 ago como ajuste).`);
+  notes.push(`Se borran ${Math.round(fake)>0?'los "ingresos" de 2002–2003 ('+fmt(fake)+')':'0 movimientos viejos'} y ${moved} ajustes entre la bolsa y tus cuentas (incluye $3,440 del 23 abr y $3,930 del 8 ago como ajustes de efectivo).`);
   notes.push('La bolsa Reembolsos se renombra "Cruces sin dinero" y queda en $0. Tu patrimonio sube lo que estaba en negativo en ella, porque esa bolsa no era dinero real.');
   return {errors,ops,notes};
 }
@@ -3741,7 +3740,7 @@ const FIXES={
     intro:()=>`Vuelo CDMX (tu mamá, la mitad), tacos tranquis, ubers del viaje, publicidad de Diana, cervecería con Victor, comida del estadio, comida rayados, tortas, Josephinos, sobres de Koke, día de las madres y las notas de tu mamá: cada gasto queda compartido y el reembolso ligado a él.`,
     months:['2026-01','2026-02','2026-03','2026-05','2026-06']},
   cierre:{key:FIX_CIERRE_KEY,title:'Transferencias sin nombre y cierre de la bolsa Reembolsos',plan:()=>fixCierrePlan(),
-    intro:()=>`Diana (publicidad 24 feb, y $1,402 del 28 jul: gastos Diana + mitad del cine), Glashe (carne san juan + Oxxo), Andrea (Mexquitic), Rober (estadio) y tu papá (pago de notas 8 jul) quedan ligados a su gasto. Lo que te dio tu mamá para el vuelo a Guadalajara (23 abr, 3 y 4 may) queda ligado al vuelo. Lo de Martita ($517) pasa a ingreso por venta de estampas.`,
+    intro:()=>`Diana (publicidad 24 feb, y $1,402 del 28 jul: gastos Diana + mitad del cine), Glashe (carne san juan + Oxxo), Andrea (Mexquitic), Rober (estadio) y tu papá (pago de notas 8 jul) quedan ligados a su gasto. Lo que te dio tu mamá para el vuelo a Guadalajara (3 y 4 may) deja de ser ingreso y queda ligado al vuelo. Lo de Martita ($517) pasa a ingreso por venta de estampas.`,
     months:['2026-02','2026-04','2026-05','2026-06','2026-07']},
 };
 let _fixOpen=null;
