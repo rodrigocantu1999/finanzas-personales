@@ -279,8 +279,8 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 .filter-summary{background:var(--card);border-radius:var(--radius-sm);padding:12px;margin:8px 0;box-shadow:0 1px 3px rgba(0,0,0,.06);display:none}
 .filter-summary.show{display:block}
 .filter-summary .grid-2{margin-top:8px}
-.filter-summary .fs-label{font-size:.7rem;color:var(--txt3)}
-.filter-summary .fs-value{font-family:var(--mono);font-weight:600;font-size:.85rem}
+.fs-label,.filter-summary .fs-label{font-size:.7rem;color:var(--txt3)}
+.fs-value,.filter-summary .fs-value{font-family:var(--mono);font-weight:600;font-size:.85rem}
 </style>
 </head>
 
@@ -644,7 +644,7 @@ let S={
   scope:(()=>{try{return localStorage.getItem('scope')||'all'}catch(e){return 'all'}})(),
   month:'',year:0,
   currentTab:'tabInicio',
-  movsTypeFilter:'all',movsAccFilter:'all',movsCatFilter:'all',
+  movsTypeFilter:'all',movsAccFilter:'all',movsCatFilter:'all',movsTrSub:'all',
   txType:'expense',txCurrency:'MXN',
   trType:'transfer',
   accCurrency:'MXN',
@@ -840,9 +840,14 @@ function budgetStatus(m,scope){
   const items=budgetsFor(m);
   const entries=Object.entries(items).filter(([cid])=>inSc(cid)).map(([cid,b])=>({cid,budget:b,spent:spent[cid]||0,covered:covered[cid]||0}));
   const catTotal=entries.reduce((s,e)=>s+e.budget,0),catUsed=entries.reduce((s,e)=>s+e.spent,0);
+  // Spending in categories with no budget still uses up the month's budget (e.g. an unplanned trip)
+  const unbudgeted=Object.entries(spent).filter(([cid])=>!items[cid]).reduce((s,[,v])=>s+v,0);
   const provTotal=provs.reduce((s,x)=>s+x.monthly,0),provUsed=provs.reduce((s,x)=>s+x.done,0);
-  return {items,entries,provs,spent,covered,total:catTotal+provTotal,used:catUsed+provUsed};
+  return {items,entries,provs,spent,covered,budgetedUsed:catUsed,unbudgeted,provUsed,
+    total:catTotal+provTotal,used:catUsed+unbudgeted+provUsed};
 }
+// The budget only covers 8 a 5 (personal life); Papás and Negocio are tracked as results, not budgeted.
+const BUDGET_SCOPE='8a5';
 
 // ── Usage-based ordering ──
 // How many movements used each account / category in the last 90 days.
@@ -1178,8 +1183,9 @@ function renderDash(){
   const pmName=monthName(pm).split(' ')[0];
 
   // Budget summary
-  // This month's budget (categories + provisions), following the ámbito selector
-  const bs=budgetStatus(m,S.scope);
+  // This month's budget (8 a 5 only): shown under Todo and 8 a 5, hidden under Papás / Negocio
+  const showBud=S.scope==='all'||S.scope===BUDGET_SCOPE;
+  const bs=budgetStatus(m,BUDGET_SCOPE);
   const budTotal=bs.total,budSpent=bs.used;
   const budAvail=budTotal-budSpent;
   const budPct=pct(budSpent,budTotal);
@@ -1224,9 +1230,9 @@ function renderDash(){
   ${S.scope==='8a5'?`<div class="card">${salaryBarHTML(incMXN,expMXN)}</div>`:''}
 
   <!-- Budget Summary (hidden in an ámbito with no budgets) -->
-  ${budTotal>0||S.scope==='all'?`<div class="card">
+  ${showBud?`<div class="card pointer" onclick="switchTab('tabPresup')">
     <div class="flex-between mb-4">
-      <div class="text-sm fw-600">Presupuesto${S.scope!=='all'?' · '+scopeName(S.scope):''}</div>
+      <div class="text-sm fw-600">Presupuesto · 8 a 5</div>
       <div class="badge ${budPct>100?'badge-red':budPct>80?'badge-yellow':'badge-green'}">${budPct}%</div>
     </div>
     <div class="progress"><div class="progress-bar" style="width:${Math.min(budPct,100)}%;background:${budPct>100?'var(--red)':budPct>80?'var(--yellow)':'var(--green)'}"></div></div>
@@ -1234,6 +1240,7 @@ function renderDash(){
       <span class="text-xs" style="color:var(--txt2)">${fmt(budSpent)} / ${fmt(budTotal)}</span>
       <span class="text-xs fw-600" style="color:${budAvail>=0?'var(--green)':'var(--red)'}">${budAvail<0?'Excedido: '+fmt(Math.abs(budAvail)):'Disponible: '+fmt(budAvail)}</span>
     </div>
+    ${bs.unbudgeted>0.5?`<div class="text-xs mt-4" style="color:var(--txt3)">Incluye ${fmt(bs.unbudgeted)} en categorías sin presupuesto</div>`:''}
   </div>`:''}
 
   <!-- Accounts Scroll -->
@@ -1404,7 +1411,8 @@ function renderMovs(){
   if(S.movsTypeFilter==='transfer'){
     let trs=S.transfers.filter(t=>mk(t.d)===m);
     if(S.movsAccFilter!=='all') trs=trs.filter(t=>t.from===S.movsAccFilter||t.to===S.movsAccFilter);
-    // Sub-filter for transfer/adjustment
+    // Sub-filter: traspasos / reembolsos / ajustes
+    if(S.movsTrSub!=='all') trs=trs.filter(t=>(t.type||'transfer')===S.movsTrSub);
     items=trs.map(t=>({...t,_isTr:true}));
   } else {
     let txs=S.transactions.filter(t=>mk(t.d)===m);
@@ -1444,19 +1452,11 @@ function renderMovs(){
   let trSubFilter='all';
   let html='';
   if(S.movsTypeFilter==='transfer'){
-    html+=`<div class="chips-row mb-8">
-      <div class="chip active" onclick="this.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));this.classList.add('active');filterTransferType('all')">Todos</div>
-      <div class="chip" onclick="this.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));this.classList.add('active');filterTransferType('transfer')">Traspasos</div>
-      <div class="chip" onclick="this.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));this.classList.add('active');filterTransferType('adjustment')">Ajustes</div>
-    </div>`;
-    // Summary
-    const trs=items;
-    const transfers=trs.filter(t=>(t.type||'transfer')==='transfer');
-    const adjustments=trs.filter(t=>t.type==='adjustment');
-    html+=`<div class="card" style="padding:10px 16px">
-      <div class="flex-between text-sm"><span class="text-blue">🔄 ${transfers.length} traspasos</span><span class="text-yellow">⚖️ ${adjustments.length} ajustes</span></div>
-    </div>`;
+    html+=`<div class="chips-row mb-8">${[['all','Todos'],['transfer','Traspasos'],['reimbursement','Reembolsos'],['adjustment','Ajustes']].map(([k,l])=>
+      `<div class="chip ${S.movsTrSub===k?'active':''}" onclick="filterTransferType('${k}')">${l}</div>`).join('')}</div>`;
   }
+  // Totals of exactly what is listed (follows every filter)
+  html+=movsTotalsHTML(items);
 
   // Sort by date desc
   items.sort((a,b)=>b.d.localeCompare(a.d));
@@ -1545,24 +1545,44 @@ function setMovsFilter(type,val){
   renderMovs();
 }
 
-let _transferTypeFilter='all';
+// Transfer sub-filter (Todos / Traspasos / Reembolsos / Ajustes): kept in state and re-rendered,
+// so the list and the totals always match
 function filterTransferType(type){
-  _transferTypeFilter=type;
-  // Re-render with filter applied inline
-  const cards=document.querySelectorAll('#movsContent .tx-item');
-  cards.forEach(card=>{
-    const onclick=card.getAttribute('onclick')||'';
-    if(onclick.includes('openTrModal')){
-      const id=onclick.match(/'([^']+)'/)?.[1];
-      if(id){
-        const tr=S.transfers.find(t=>t.id===id);
-        if(tr){
-          const trType=tr.type||'transfer';
-          card.parentElement.style.display=(type==='all'||trType===type)?'':'none';
-        }
-      }
-    }
+  S.movsTrSub=type;
+  renderMovs();
+}
+
+// MXN value of a transfer (uses the MXN side of a conversion, or the month's TC for USD)
+function trMXN(t){
+  if(t.fromCurrency&&t.toCurrency&&t.fromCurrency!==t.toCurrency){
+    if(t.toCurrency==='MXN') return t.toAmount||t.amount;
+    if(t.fromCurrency==='MXN') return t.fromAmount||t.amount;
+  }
+  const cur=t.currency||t.fromCurrency||'MXN';
+  return cur==='USD'?t.amount*getTC(mk(t.d)):t.amount;
+}
+// Totals card for the Movimientos list: income, expenses (your share in shared ones), net, and transfers by type
+function movsTotalsHTML(items){
+  let inc=0,exp=0,nInc=0,nExp=0;
+  const tr={transfer:[0,0],reimbursement:[0,0],adjustment:[0,0]};
+  items.forEach(it=>{
+    if(it._isTr){const k=it.type||'transfer';(tr[k]=tr[k]||[0,0]);tr[k][0]+=trMXN(it);tr[k][1]++;}
+    else if(it.tp==='income'){inc+=txToMXN(it);nInc++;}
+    else {exp+=realExpenseMXN(it);nExp++;}
   });
+  const trLabels={transfer:'Traspasos',reimbursement:'Reembolsos',adjustment:'Ajustes'};
+  const trRows=Object.entries(tr).filter(([,v])=>v[1]>0);
+  if(!nInc&&!nExp&&!trRows.length) return '';
+  const box=(label,val,n,cls)=>`<div><div class="fs-label">${label} · ${n}</div><div class="fs-value ${cls||''}">${fmt(val)}</div></div>`;
+  return `<div class="card" style="padding:10px 16px">
+    ${nInc||nExp?`<div style="display:grid;grid-template-columns:repeat(${nInc&&nExp?3:1},minmax(0,1fr));gap:8px">
+      ${nInc?box('Ingresos',inc,nInc,'text-green'):''}${nExp?box('Gastos',exp,nExp,'text-red'):''}
+      ${nInc&&nExp?`<div><div class="fs-label">Neto</div><div class="fs-value ${inc-exp>=0?'text-green':'text-red'}">${fmt(inc-exp)}</div></div>`:''}
+    </div>`:''}
+    ${trRows.length?`<div style="display:grid;grid-template-columns:repeat(${trRows.length},minmax(0,1fr));gap:8px;${nInc||nExp?'margin-top:8px;padding-top:8px;border-top:1px solid var(--border)':''}">
+      ${trRows.map(([k,v])=>box(trLabels[k]||k,v[0],v[1])).join('')}</div>`:''}
+    ${nExp?`<div class="text-xs mt-4" style="color:var(--txt3)">En gastos compartidos se suma solo tu parte. Montos en pesos.</div>`:''}
+  </div>`;
 }
 
 // Shared expense actions
@@ -1776,19 +1796,19 @@ function renderCuentas(){
 // ═══════════════════════════════════════
 function renderPresup(){
   const m=S.month;
-  const bs=budgetStatus(m,'all');
+  const bs=budgetStatus(m,BUDGET_SCOPE); // 8 a 5 only
   const src=budgetSourceMonth(m);
   const budAvail=bs.total-bs.used;
   const budP=pct(bs.used,bs.total);
   const barCol=p=>p>100?'var(--red)':p>80?'var(--yellow)':'var(--green)';
 
   let html=newMonthBudgetBanner(m,true)+`<div class="hero-card">
-    <div class="hero-label">Presupuesto de ${monthName(m)}</div>
+    <div class="hero-label">Presupuesto de ${monthName(m)} · 8 a 5</div>
     <div class="hero-amount">${fmt(bs.total)}</div>
     <div style="font-size:.7rem;opacity:.85">${S.budgetMonths[m]?'Presupuesto propio de este mes':'Copiado de '+(src?monthName(src):'tu presupuesto original')} · incluye provisiones</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
       <div class="sub-card">
-        <div class="sub-label">GASTADO + APARTADO</div>
+        <div class="sub-label">UTILIZADO</div>
         <div class="sub-value">${fmt(bs.used)}</div>
       </div>
       <div class="sub-card">
@@ -1799,6 +1819,11 @@ function renderPresup(){
     <div style="margin-top:12px">
       <div class="progress" style="background:rgba(255,255,255,.2)"><div class="progress-bar" style="width:${Math.min(budP,100)}%;background:rgba(255,255,255,.9)"></div></div>
       <div style="text-align:center;margin-top:4px;font-size:.7rem;opacity:.8">${budP}% utilizado</div>
+    </div>
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.2);font-size:.7rem;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;text-align:center">
+      <div><div style="opacity:.8">Presupuestado</div><div style="font-family:var(--mono);font-weight:700">${fmt0(bs.budgetedUsed)}</div></div>
+      <div><div style="opacity:.8">Sin presupuesto</div><div style="font-family:var(--mono);font-weight:700">${fmt0(bs.unbudgeted)}</div></div>
+      <div><div style="opacity:.8">Apartado</div><div style="font-family:var(--mono);font-weight:700">${fmt0(bs.provUsed)}</div></div>
     </div>
   </div>`;
 
@@ -1847,7 +1872,7 @@ function renderPresup(){
   // Spending in categories with no budget this month
   const noBudgetEntries=Object.entries(bs.spent).filter(([cid,v])=>!bs.items[cid]&&v>0.004).sort((a,b)=>b[1]-a[1]);
   if(noBudgetEntries.length){
-    html+=`<div class="section-header"><span>SIN PRESUPUESTO</span><span class="text-mono text-red">${fmt(noBudgetEntries.reduce((s,e)=>s+e[1],0))}</span></div>`;
+    html+=`<div class="section-header"><span>SIN PRESUPUESTO · cuenta en el utilizado</span><span class="text-mono text-red">${fmt(noBudgetEntries.reduce((s,e)=>s+e[1],0))}</span></div>`;
     noBudgetEntries.forEach(([cid,amt])=>{
       const cat=getCat(cid);
       html+=`<div class="card" style="padding:10px 16px"><div class="flex-between" style="align-items:center">
@@ -2118,7 +2143,7 @@ function renderAnalisis(){
 
   // Budget overruns
   const overruns=[];
-  budgetStatus(m,S.scope).entries.forEach(({cid,budget:amt,spent:s})=>{
+  (S.scope==='all'||S.scope===BUDGET_SCOPE?budgetStatus(m,BUDGET_SCOPE).entries:[]).forEach(({cid,budget:amt,spent:s})=>{
     if(s>amt) overruns.push({cat:getCat(cid),over:s-amt,pct:Math.round(s/amt*100)});
   });
   overruns.forEach(o=>{
@@ -2935,7 +2960,7 @@ function newMonthBudgetBanner(m,inPresup){
   if(m!==currentMonth()) return '';
   const bm=S.budgetMonths[m];
   if(bm&&bm.confirmed) return '';
-  const tot=Object.values(budgetsFor(m)).reduce((s,a)=>s+a,0);
+  const tot=Object.entries(budgetsFor(m)).filter(([cid])=>catScope(cid)===BUDGET_SCOPE).reduce((s,[,a])=>s+a,0);
   const due=S.provisions.filter(p=>provActive(p,m)&&provDueMonth(p,m)===m);
   return `<div class="card" style="border:2px solid var(--accent)">
     <div class="text-sm fw-600">Nuevo mes: ${monthName(m)}</div>
