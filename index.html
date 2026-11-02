@@ -504,6 +504,18 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 </div>
 </div>
 
+<!-- One-time fix preview -->
+<div class="modal-overlay" id="fixModal">
+<div class="modal" style="padding-bottom:30px">
+  <div class="modal-title"><span>Corrección jun–ago</span><button class="modal-close" onclick="closeModal('fixModal')">&times;</button></div>
+  <div id="fixBody"></div>
+  <div style="margin-top:16px;display:flex;gap:8px">
+    <button class="btn btn-outline" style="flex:1" onclick="closeModal('fixModal')">Cancelar</button>
+    <button class="btn btn-primary" style="flex:1" id="fixApplyBtn" onclick="applyFixMundial()">Aplicar</button>
+  </div>
+</div>
+</div>
+
 <!-- Provision Modal -->
 <div class="modal-overlay" id="provModal">
 <div class="modal">
@@ -581,6 +593,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
   <div class="modal-title"><span>¿En qué cuenta recibiste?</span><button class="modal-close" onclick="closeModal('markPaidModal')">&times;</button></div>
   <div id="markPaidInfo" class="text-sm mb-12" style="color:var(--txt2)"></div>
   <div class="mb-12"><label class="text-xs fw-600" style="color:var(--txt3)">Fecha de pago</label><input type="date" id="markPaidDate" class="input" style="margin-top:4px"></div>
+  <div class="mb-12"><label class="text-xs fw-600" style="color:var(--txt3)">¿Cuánto te pagó? (si es un abono, pon solo lo que te dio)</label><input type="number" id="markPaidAmount" inputmode="decimal" step="0.01" style="margin-top:4px"></div>
   <div id="markPaidAccList" style="display:flex;flex-direction:column;gap:8px"></div>
 </div>
 </div>
@@ -1309,13 +1322,14 @@ function renderDash(){
   const owedByPerson={};
   S.transactions.forEach(tx=>{
     if(!tx.shared||!tx.shared.enabled||!tx.shared.people) return;
-    tx.shared.people.forEach(p=>{
-      if(p.paid||p.absorbed) return;
+    tx.shared.people.forEach((p,idx)=>{
+      const rem=personRemaining(p); // what's still owed after abonos
+      if(rem<=0.005) return;
       const name=p.name||'?';
       if(!owedByPerson[name]) owedByPerson[name]={total:0,details:[]};
-      const amtMXN=tx.currency==='USD'?p.amount*getTC(mk(tx.d)):p.amount;
+      const amtMXN=tx.currency==='USD'?rem*getTC(mk(tx.d)):rem;
       owedByPerson[name].total+=amtMXN;
-      owedByPerson[name].details.push({tx,person:p,amtMXN});
+      owedByPerson[name].details.push({tx,person:p,idx,rem,amtMXN});
     });
   });
   const owedEntries=Object.entries(owedByPerson).sort((a,b)=>b[1].total-a[1].total);
@@ -1336,12 +1350,13 @@ function renderDash(){
       data.details.forEach(d=>{
         const cat=getCat(d.tx.c);
         const isU=d.tx.currency==='USD';
-        const pIdx=d.tx.shared.people.findIndex(pp=>pp.name===d.person.name&&!pp.paid&&!pp.absorbed);
+        const pIdx=d.idx;
         html+=`<div style="padding:6px 0;border-bottom:1px solid var(--border)">
           <div class="flex-between text-xs" style="color:var(--txt2)">
             <div>${cat.emoji} ${d.tx.ds} <span style="color:var(--txt3)">· ${dayLabel(d.tx.d)}</span></div>
-            <div class="text-mono">${isU?fmt(d.person.amount,'USD')+' <span style="color:var(--txt3)">≈'+fmt(d.amtMXN)+'</span>':fmt(d.person.amount)}</div>
+            <div class="text-mono">${isU?fmt(d.rem,'USD')+' <span style="color:var(--txt3)">≈'+fmt(d.amtMXN)+'</span>':fmt(d.rem)}</div>
           </div>
+          ${d.person.paidAmount?`<div class="text-xs" style="color:var(--txt3)">Abonado ${isU?fmt(d.person.paidAmount,'USD'):fmt(d.person.paidAmount)} de ${isU?fmt(d.person.amount,'USD'):fmt(d.person.amount)}</div>`:''}
           <div style="display:flex;gap:6px;margin-top:6px">
             <button class="btn btn-xs" style="background:var(--green);color:#fff;font-size:.65rem;padding:3px 8px;border-radius:6px" onclick="event.stopPropagation();markPaid('${d.tx.id}',${pIdx})">✓ Ya me pagó</button>
             <button class="btn btn-xs" style="background:var(--accent);color:#fff;font-size:.65rem;padding:3px 8px;border-radius:6px" onclick="event.stopPropagation();absorbShare('${d.tx.id}',${pIdx})">Absorber</button>
@@ -1514,7 +1529,7 @@ function renderMovs(){
           html+=`<div class="shared-detail" id="shared_${item.id}" style="display:none">
             <div class="text-xs fw-600 mb-4">Personas:</div>`;
           item.shared.people.forEach((p,pi)=>{
-            const status=p.absorbed?'🔄 Absorbido':p.paid?'✅ Pagado':'⏳ Pendiente';
+            const status=p.absorbed?'🔄 Absorbido':p.paid?'✅ Pagado':p.paidAmount?'⏳ Abonó '+fmt(p.paidAmount):'⏳ Pendiente';
             html+=`<div class="shared-person">
               <div><span class="fw-600">${p.name}</span> · ${fmt(p.amount)} · ${status}</div>
               <div class="shared-actions">
@@ -1524,7 +1539,7 @@ function renderMovs(){
             </div>`;
           });
           const totalOwed=item.shared.people.filter(p=>!p.paid&&!p.absorbed).reduce((s,p)=>s+p.amount,0);
-          const totalPaid=item.shared.people.filter(p=>p.paid).reduce((s,p)=>s+p.amount,0);
+          const totalPaid=item.shared.people.reduce((s,p)=>s+Math.min(personPaid(p),p.amount||0),0);
           const totalAll=item.shared.people.reduce((s,p)=>s+p.amount,0);
           html+=`<div class="mt-8"><div class="text-xs">Cobrado: ${fmt(totalPaid)} / ${fmt(totalAll)}</div>
             <div class="progress"><div class="progress-bar" style="width:${pct(totalPaid,totalAll)}%;background:var(--green)"></div></div></div>`;
@@ -1586,6 +1601,9 @@ function movsTotalsHTML(items){
 }
 
 // Shared expense actions
+// A person can pay in parts (abonos): paidAmount adds them up; paid becomes true once it covers their amount.
+function personPaid(p){return p.paid?Math.max(p.amount||0,p.paidAmount||0):(p.paidAmount||0)}
+function personRemaining(p){return p.paid||p.absorbed?0:Math.max(0,(p.amount||0)-(p.paidAmount||0))}
 let _markPaidPending=null;
 function markPaid(txId,personIdx){
   const tx=S.transactions.find(t=>t.id===txId);
@@ -1593,9 +1611,13 @@ function markPaid(txId,personIdx){
   const person=tx.shared.people[personIdx];
   _markPaidPending={txId,personIdx,person,tx};
 
-  // Show info
+  // Show info: what's still owed, and what was already paid in abonos
   const isU=tx.currency==='USD';
-  document.getElementById('markPaidInfo').innerHTML=`<strong>${person.name}</strong> te paga <strong>${isU?fmt(person.amount,'USD'):fmt(person.amount)}</strong> por "${tx.ds}"`;
+  const f=v=>isU?fmt(v,'USD'):fmt(v);
+  const rem=personRemaining(person);
+  document.getElementById('markPaidInfo').innerHTML=`<strong>${person.name}</strong> te debe <strong>${f(rem)}</strong> por "${tx.ds}"`+
+    (person.paidAmount?`<div class="text-xs" style="color:var(--txt3)">Ya te abonó ${f(person.paidAmount)} de ${f(person.amount)}</div>`:'');
+  document.getElementById('markPaidAmount').value=Math.round(rem*100)/100;
 
   // Build account list (most used first)
   let html='';
@@ -1615,17 +1637,21 @@ async function confirmMarkPaid(accId){
   closeModal('markPaidModal');
   if(!_markPaidPending) return;
   const{txId,personIdx,person,tx}=_markPaidPending;
+  const payAmt=Math.round((parseFloat(document.getElementById('markPaidAmount').value)||0)*100)/100;
+  if(payAmt<=0){alert('Ingresa cuánto te pagó');openModal('markPaidModal');return}
   _markPaidPending=null;
-
-  // 1. Mark as paid
-  tx.shared.people[personIdx].paid=true;
-  await fsUpdate('transactions',txId,{shared:tx.shared});
-
-  // 2. Split the payment: the part that gives back what you paid is a reimbursement (a transfer, not income);
-  //    anything beyond what you paid is income in "Otros ingresos".
   const txCur=tx.currency||'MXN';
   const paidDate=document.getElementById('markPaidDate').value||today();
-  const split=splitSharedPayment(tx,personIdx);
+
+  // 1. Split the payment first (it depends on what was collected before): the part that gives back what you paid
+  //    is a reimbursement (a transfer, not income); anything beyond what you paid is income in "Otros ingresos".
+  const split=splitSharedPayment(tx,personIdx,payAmt);
+
+  // 2. Add the abono; fully paid once it covers their amount
+  const p=tx.shared.people[personIdx];
+  p.paidAmount=Math.round(((p.paidAmount||0)+payAmt)*100)/100;
+  p.paid=p.paidAmount>=(p.amount||0)-0.005;
+  await fsUpdate('transactions',txId,{shared:tx.shared});
   if(split.reimb>0.004){
     const trData={
       type:'reimbursement',
@@ -1675,11 +1701,12 @@ async function confirmMarkPaid(accId){
 
 // How much of person #personIdx's payment returns money you paid (reimbursement) and how much is extra (income).
 // Others together cover what you paid minus your share; payments fill that first, the rest is income.
-function splitSharedPayment(tx,personIdx){
+function splitSharedPayment(tx,personIdx,payAmt){
   const sh=tx.shared;
-  const amount=sh.people[personIdx].amount||0;
+  const amount=payAmt!==undefined?payAmt:personRemaining(sh.people[personIdx]);
   const cap=Math.max(0,(tx.a||0)-(sh.myShare||0));
-  const collected=sh.people.reduce((s,p,i)=>s+(i!==personIdx&&p.paid?p.amount||0:0),0);
+  // Everything collected so far from everyone (abonos included), before this payment
+  const collected=sh.people.reduce((s,p)=>s+personPaid(p),0);
   const reimb=Math.round(Math.min(amount,Math.max(0,cap-collected))*100)/100;
   return {reimb,income:Math.round((amount-reimb)*100)/100};
 }
@@ -1693,9 +1720,10 @@ function otherIncomeCategoryId(){
 async function absorbShare(txId,personIdx){
   const tx=S.transactions.find(t=>t.id===txId);
   if(!tx||!tx.shared) return;
+  // Only what they still owe is absorbed (abonos already paid stay paid).
+  // It first cancels any excess (money you'd have earned on top), the rest becomes your cost.
+  const amt=personRemaining(tx.shared.people[personIdx]);
   tx.shared.people[personIdx].absorbed=true;
-  // Their amount first cancels any excess (money you'd have earned on top), the rest becomes your cost
-  const amt=tx.shared.people[personIdx].amount||0;
   const excess=tx.shared.excess||0;
   const fromExcess=Math.min(excess,amt);
   tx.shared.excess=Math.round((excess-fromExcess)*100)/100;
@@ -2161,7 +2189,7 @@ function renderAnalisis(){
 // RENDER: AJUSTES
 // ═══════════════════════════════════════
 function renderAjustes(){
-  let html='';
+  let html=fixMundialCardHTML();
 
   // Exchange rates section
   html+=`<div class="card">
@@ -2505,6 +2533,7 @@ async function saveTx(){
         name:p.name.trim(),
         amount:S.sharedMode==='even'?Math.round((total/(S.sharedPeople.length+1))*100)/100:p.amount,
         paid:p.paid||false,
+        paidAmount:p.paidAmount||0, // abonos already received
         absorbed:p.absorbed||false
       }))
     };
@@ -3429,6 +3458,190 @@ async function initApp(){
     // Try offline mode
     R();
   }
+}
+
+// ═══════════════════════════════════════
+// ONE-TIME FIX (Nov 2026): World Cup tickets (Argentina / Portugal) and betting (Jun–Jul 2026)
+// Built from Rodrigo's ticket sheet and his Afirme statements. It previews first and only writes when confirmed.
+// ═══════════════════════════════════════
+const FIX_MUNDIAL_KEY='fixMundialApuestas';
+const FIX_MD_ACC='a_malas_decisiones';
+function fixMundialPlan(){
+  const errors=[],ops=[],notes=[];
+  const accBy=n=>S.accounts.find(a=>a.name.trim()===n);
+  const catBy=(n,tp)=>S.categories.find(c=>c.name.trim().toLowerCase()===n.toLowerCase()&&c.type===tp);
+  const afirme=accBy('Afirme Débito'),nu=accBy('NU Débito'),reemb=accBy('Reembolsos');
+  const catMD=catBy('Malas decisiones','expense'),catMundial=catBy('Mundial','expense');
+  [['cuenta Afirme Débito',afirme],['cuenta NU Débito',nu],['cuenta Reembolsos',reemb],['categoría Malas decisiones',catMD],['categoría Mundial',catMundial]].forEach(([n,x])=>{if(!x) errors.push('No encontré la '+n)});
+  if(errors.length) return {errors,ops,notes};
+  const one=(label,list)=>{if(list.length!==1){errors.push(`${label}: encontré ${list.length}, esperaba 1`);return null}return list[0]};
+  const near=(a,b)=>Math.abs(a-b)<0.005;
+  const r2=v=>Math.round(v*100)/100;
+
+  // ── Betting: account "Malas Decisiones" ──
+  if(S.accounts.some(a=>a.id===FIX_MD_ACC)) errors.push('La cuenta "Malas Decisiones" ya existe (¿ya se aplicó?)');
+  ops.push({k:'addAcc',id:FIX_MD_ACC,data:{name:'Malas Decisiones',type:'other',currency:'MXN',icon:'🎲',color:'#E11D48',initialBalance:0}});
+  // Deposits: the "Malas decisiones" expenses from Afirme in June and July become transfers Afirme → Malas Decisiones
+  const deposits=S.transactions.filter(t=>t.tp==='expense'&&t.c===catMD.id&&t.acc===afirme.id&&(mk(t.d)==='2026-06'||mk(t.d)==='2026-07'));
+  const depBy={'2026-06':0,'2026-07':0};
+  deposits.forEach(t=>{
+    depBy[mk(t.d)]+=t.a;
+    ops.push({k:'delTx',id:t.id});
+    ops.push({k:'addTr',id:'fx_dep_'+t.id,data:{from:afirme.id,to:FIX_MD_ACC,type:'transfer',desc:'Depósito apuestas',d:t.d,amount:t.a}});
+  });
+  if(deposits.length!==57||!near(depBy['2026-06'],39952)||!near(depBy['2026-07'],20464))
+    errors.push(`Depósitos de apuestas: esperaba 57 por $39,952 (jun) y $20,464 (jul); encontré ${deposits.length} por ${fmt(depBy['2026-06'])} y ${fmt(depBy['2026-07'])}`);
+  // Winnings: the 4 transfers Reembolsos → Afirme that the bank shows as coming from the casino now come from Malas Decisiones
+  const winList=[['2026-06-12',7000],['2026-06-17',500.94],['2026-06-22',5700.42],['2026-06-23',26504.3]];
+  const winBy={'2026-06':0,'2026-07':0};
+  winList.forEach(([d,a])=>{
+    const t=one(`Ganancia del ${d} por ${fmt(a)}`,S.transfers.filter(x=>x.from===reemb.id&&x.to===afirme.id&&x.d===d&&near(x.amount,a)));
+    if(!t) return;
+    winBy[mk(d)]+=a;
+    ops.push({k:'updTr',id:t.id,data:{from:FIX_MD_ACC,desc:'Retiro apuestas (ganancia)'}});
+  });
+  // Real loss per month = deposits − winnings, one expense each, so the account ends at $0
+  [['2026-06','2026-06-30','junio'],['2026-07','2026-07-31','julio']].forEach(([m,d,name])=>{
+    const loss=r2(depBy[m]-winBy[m]);
+    if(loss>0) ops.push({k:'addTx',id:'fx_loss_'+m,data:{tp:'expense',a:loss,ds:'Pérdida neta apuestas '+name,c:catMD.id,acc:FIX_MD_ACC,d,currency:'MXN'}});
+  });
+  const winTotal=r2(winBy['2026-06']+winBy['2026-07']);
+
+  // ── Argentina: 3 tickets $57,288, your share $19,096; Edy and papá $19,096 each ──
+  const arg=one('Gasto "3 Boletos mundial argentina" de $57,288',S.transactions.filter(t=>t.tp==='expense'&&t.ds.trim()==='3 Boletos mundial argentina'&&near(t.a,57288)));
+  // Edy's cash, now reimbursements (they used to be transfers out of the Reembolsos pouch)
+  const edyCash=[['2026-06-01',5100],['2026-06-18',2000],['2026-07-08',5000],['2026-07-16',10000],['2026-08-08',1000]];
+  let cash=0;
+  edyCash.forEach(([d,a])=>{
+    const t=one(`Pago de Edy del ${d} por ${fmt(a)}`,S.transfers.filter(x=>x.from===reemb.id&&x.to===nu.id&&x.d===d&&near(x.amount,a)));
+    if(!t||!arg) return;
+    cash+=a;
+    ops.push({k:'updTr',id:t.id,data:{from:null,type:'reimbursement',desc:'Reembolso: Edy - 3 Boletos mundial argentina',txId:arg.id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
+  });
+  // Settled without money: subtracted from your debt with Edy, and the quiniela
+  const deuda=one('Gasto "Pago Deuda edy" de $3,342 del 8 ago',S.transactions.filter(t=>t.tp==='expense'&&t.acc===reemb.id&&t.d==='2026-08-08'&&near(t.a,3342)));
+  const quinela=one('Gasto "Quinela edy" de $500 del 8 ago',S.transactions.filter(t=>t.tp==='expense'&&t.acc===reemb.id&&t.d==='2026-08-08'&&near(t.a,500)));
+  const offsets=[];
+  if(arg&&deuda) offsets.push(['2026-08-08',3342,'Reembolso: Edy - boletos (cruzado con Deuda edy)']);
+  if(arg&&quinela) offsets.push(['2026-08-08',500,'Reembolso: Edy - boletos (cruzado con la quiniela)']);
+  offsets.forEach(([d,a,desc],i)=>ops.push({k:'addTr',id:'fx_off_'+i,data:{from:null,to:reemb.id,type:'reimbursement',desc,d,amount:a,txId:arg.id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}}));
+  const offsetTotal=offsets.reduce((s,o)=>s+o[1],0);
+  // Portugal: your $10,200 ticket, paid by crossing it with what papá owed you (no money moved)
+  if(arg){
+    ops.push({k:'addTx',id:'fx_portugal',data:{tp:'expense',a:10200,ds:'Boleto mundial Portugal (pagó papá)',c:catMundial.id,acc:reemb.id,d:'2026-06-01',currency:'MXN'}});
+    ops.push({k:'addTr',id:'fx_portugal_cruce',data:{from:null,to:reemb.id,type:'reimbursement',desc:'Reembolso: Papá - cruzado con el boleto de Portugal',d:'2026-06-01',amount:10200,txId:arg.id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
+    // Edy's World Cup stickers that you sold: you kept the money and subtracted $1,050 from what he owed you.
+    // It's your cost (the stickers were his), paid by crossing it with the tickets (no money moved).
+    const catAlbum=catBy('Album mundial','expense')||catMundial;
+    ops.push({k:'addTx',id:'fx_estampas',data:{tp:'expense',a:1050,ds:'Estampas de Edy que vendí (cruzado con boletos)',c:catAlbum.id,acc:reemb.id,d:'2026-08-08',currency:'MXN'}});
+    ops.push({k:'addTr',id:'fx_estampas_cruce',data:{from:null,to:reemb.id,type:'reimbursement',desc:'Reembolso: Edy - boletos (cruzado con sus estampas)',d:'2026-08-08',amount:1050,txId:arg.id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
+    // Who has paid what: Edy covers his ticket first, the rest of what he gave counts for papá
+    const received=cash+offsetTotal+1050+10200;
+    const edyPaid=Math.min(19096,cash+offsetTotal+1050);
+    const papaPaid=r2(received-edyPaid);
+    ops.push({k:'updTx',id:arg.id,data:{shared:{enabled:true,mode:'custom',total:57288,myShare:19096,excess:0,people:[
+      {name:'Edy',amount:19096,paidAmount:r2(edyPaid),paid:edyPaid>=19096-0.005,absorbed:false},
+      {name:'Papá (lo paga Edy)',amount:19096,paidAmount:papaPaid,paid:papaPaid>=19096-0.005,absorbed:false},
+    ]}}});
+    notes.push(`Te pagaron ${fmt(received)} de ${fmt(38192)}: Edy en efectivo ${fmt(cash)}, cruces con Edy ${fmt(offsetTotal+1050)} (deuda, quiniela y estampas), cruce de Portugal con tu papá ${fmt(10200)}.${Math.abs(38192-received)>0.5?` Pendiente ${fmt(38192-received)} (queda en "Te deben").`:' Queda liquidado.'}`);
+  }
+  // ── Reembolsos pouch: lower its starting balance by what no longer comes out of it, so it ends where it is today ──
+  const shift=r2(winTotal+cash+offsetTotal);
+  ops.push({k:'updAcc',id:reemb.id,data:{initialBalance:r2((reemb.initialBalance||0)-shift)}});
+  notes.push(`Saldo inicial de Reembolsos: ${fmt(reemb.initialBalance||0)} → ${fmt((reemb.initialBalance||0)-shift)}`);
+  return {errors,ops,notes};
+}
+// Apply ops to an in-memory copy (preview) or to S
+function fixApplyLocal(st,ops){
+  ops.forEach(o=>{
+    if(o.k==='addAcc') st.accounts.push({id:o.id,...o.data});
+    if(o.k==='updAcc'){const a=st.accounts.find(x=>x.id===o.id);Object.assign(a,o.data)}
+    if(o.k==='delTx') st.transactions=st.transactions.filter(x=>x.id!==o.id);
+    if(o.k==='addTx') st.transactions.push({id:o.id,...o.data});
+    if(o.k==='updTx'){const t=st.transactions.find(x=>x.id===o.id);Object.assign(t,JSON.parse(JSON.stringify(o.data)))}
+    if(o.k==='addTr') st.transfers.push({id:o.id,...o.data});
+    if(o.k==='updTr'){const t=st.transfers.find(x=>x.id===o.id);Object.assign(t,o.data)}
+  });
+  return st;
+}
+// Numbers to compare before / after
+function fixStats(){
+  const months=['2026-06','2026-07','2026-08'];
+  const exp={},exp8={};
+  months.forEach(m=>{
+    const tx=S.transactions.filter(t=>t.tp==='expense'&&mk(t.d)===m);
+    exp[m]=tx.reduce((s,t)=>s+realExpenseMXN(t),0);
+    exp8[m]=tx.filter(t=>txScope(t)==='8a5').reduce((s,t)=>s+realExpenseMXN(t),0);
+  });
+  const bal={};
+  S.accounts.forEach(a=>{bal[a.name]=calcAccBalance(a.id)});
+  return {exp,exp8,bal,pat:totalPatrimonio(currentMonth()).total};
+}
+function withState(st,fn){
+  const keep={transactions:S.transactions,transfers:S.transfers,accounts:S.accounts};
+  S.transactions=st.transactions;S.transfers=st.transfers;S.accounts=st.accounts;
+  try{return fn()}finally{Object.assign(S,keep)}
+}
+function openFixMundial(){
+  const plan=fixMundialPlan();
+  const before=fixStats();
+  const copy={transactions:JSON.parse(JSON.stringify(S.transactions)),transfers:JSON.parse(JSON.stringify(S.transfers)),accounts:JSON.parse(JSON.stringify(S.accounts))};
+  const after=withState(fixApplyLocal(copy,plan.ops),fixStats);
+  const cnt=k=>plan.ops.filter(o=>o.k===k).length;
+  const row=(l,a,b)=>`<div class="flex-between text-xs" style="padding:3px 0"><span>${l}</span><span class="text-mono">${fmt0(a)} → <b>${fmt0(b)}</b></span></div>`;
+  const changedBal=Object.keys(before.bal).filter(n=>Math.abs((before.bal[n]||0)-(after.bal[n]||0))>0.005);
+  let h=plan.errors.length?`<div class="card" style="border:2px solid var(--red)"><div class="text-sm fw-600" style="color:var(--red)">No se puede aplicar</div>${plan.errors.map(e=>`<div class="text-xs mt-4">• ${e}</div>`).join('')}</div>`:'';
+  h+=`<div class="text-xs" style="color:var(--txt2);line-height:1.5">
+    <b>Apuestas:</b> nueva cuenta "Malas Decisiones". ${cnt('delTx')} depósitos pasan de gasto a traspaso; 4 ganancias salen de esa cuenta; un gasto por la pérdida real de junio y otro de julio.<br>
+    <b>Argentina:</b> gasto compartido, tu parte $19,096 (Edy y tu papá $19,096 cada uno), con los pagos de Edy como reembolsos en sus fechas.<br>
+    <b>Portugal:</b> tu boleto de $10,200 como gasto en Mundial, pagado cruzándolo con lo que te debía tu papá.<br>
+    <b>Estampas de Edy:</b> $1,050 como gasto en Album mundial, pagado cruzándolo con lo que te debía de los boletos.<br>
+    ${plan.notes.map(n=>'• '+n).join('<br>')}</div>
+    <div class="text-sm fw-600 mt-8">Gastos del mes (todo)</div>
+    ${['2026-06','2026-07','2026-08'].map(m=>row(monthName(m),before.exp[m],after.exp[m])).join('')}
+    <div class="text-sm fw-600 mt-8">Gastos de 8 a 5</div>
+    ${['2026-06','2026-07','2026-08'].map(m=>row(monthName(m),before.exp8[m],after.exp8[m])).join('')}
+    <div class="text-sm fw-600 mt-8">Saldos</div>
+    ${row('Patrimonio',before.pat,after.pat)}
+    <div class="text-xs" style="color:${changedBal.length?'var(--red)':'var(--green)'}">${changedBal.length?'Cambian: '+changedBal.join(', '):'Ninguna cuenta cambia de saldo'}</div>`;
+  document.getElementById('fixBody').innerHTML=h;
+  const btn=document.getElementById('fixApplyBtn');
+  btn.disabled=!!plan.errors.length;btn.style.opacity=plan.errors.length?.4:1;
+  openModal('fixModal');
+}
+async function applyFixMundial(){
+  const plan=fixMundialPlan();
+  if(plan.errors.length){alert('No se puede aplicar:\n'+plan.errors.join('\n'));return}
+  if(!navigator.onLine){alert('Necesitas internet para aplicar la corrección');return}
+  const btn=document.getElementById('fixApplyBtn');btn.disabled=true;btn.textContent='Aplicando…';
+  try{
+    for(const o of plan.ops){
+      if(o.k==='addAcc') await fsSet('accounts',o.id,o.data);
+      if(o.k==='updAcc') await fsUpdate('accounts',o.id,o.data);
+      if(o.k==='delTx') await fsDel('transactions',o.id);
+      if(o.k==='addTx') await fsSet('transactions',o.id,o.data);
+      if(o.k==='updTx') await fsUpdate('transactions',o.id,o.data);
+      if(o.k==='addTr') await fsSet('transfers',o.id,o.data);
+      if(o.k==='updTr') await fsUpdate('transfers',o.id,o.data);
+    }
+    fixApplyLocal(S,plan.ops);
+    S.meta[FIX_MUNDIAL_KEY]=today();
+    await fsDoc('meta/status',{[FIX_MUNDIAL_KEY]:today()});
+    closeModal('fixModal');
+    R();
+    alert('Corrección aplicada');
+  }catch(e){
+    console.error('fix',e);
+    alert('Se detuvo a la mitad por un error: '+e.message+'\nNo vuelvas a aplicarla; avísame para revisarlo.');
+  }finally{btn.textContent='Aplicar';}
+}
+function fixMundialCardHTML(){
+  if(S.meta&&S.meta[FIX_MUNDIAL_KEY]) return `<div class="card"><div class="text-sm fw-600">✅ Corrección de boletos del Mundial y apuestas</div><div class="text-xs mt-4" style="color:var(--txt3)">Aplicada el ${S.meta[FIX_MUNDIAL_KEY]}</div></div>`;
+  return `<div class="card" style="border:2px solid var(--accent)">
+    <div class="text-sm fw-600">Corrección pendiente: boletos del Mundial y apuestas (jun–ago)</div>
+    <div class="text-xs mt-4" style="color:var(--txt2)">Revisa los cambios antes de aplicarlos. No se aplica nada hasta que confirmes.</div>
+    <button class="btn btn-sm btn-primary mt-8" style="width:100%" onclick="openFixMundial()">Ver cambios</button>
+  </div>`;
 }
 
 // ═══════════════════════════════════════
