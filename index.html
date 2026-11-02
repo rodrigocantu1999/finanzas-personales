@@ -507,11 +507,11 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 <!-- One-time fix preview -->
 <div class="modal-overlay" id="fixModal">
 <div class="modal" style="padding-bottom:30px">
-  <div class="modal-title"><span>Corrección jun–ago</span><button class="modal-close" onclick="closeModal('fixModal')">&times;</button></div>
+  <div class="modal-title"><span id="fixTitle">Corrección</span><button class="modal-close" onclick="closeModal('fixModal')">&times;</button></div>
   <div id="fixBody"></div>
   <div style="margin-top:16px;display:flex;gap:8px">
     <button class="btn btn-outline" style="flex:1" onclick="closeModal('fixModal')">Cancelar</button>
-    <button class="btn btn-primary" style="flex:1" id="fixApplyBtn" onclick="applyFixMundial()">Aplicar</button>
+    <button class="btn btn-primary" style="flex:1" id="fixApplyBtn" onclick="applyFix()">Aplicar</button>
   </div>
 </div>
 </div>
@@ -3561,56 +3561,136 @@ function fixApplyLocal(st,ops){
     if(o.k==='updTx'){const t=st.transactions.find(x=>x.id===o.id);Object.assign(t,JSON.parse(JSON.stringify(o.data)))}
     if(o.k==='addTr') st.transfers.push({id:o.id,...o.data});
     if(o.k==='updTr'){const t=st.transfers.find(x=>x.id===o.id);Object.assign(t,o.data)}
+    if(o.k==='delTr') st.transfers=st.transfers.filter(x=>x.id!==o.id);
   });
   return st;
 }
 // Numbers to compare before / after
-function fixStats(){
-  const months=['2026-06','2026-07','2026-08'];
-  const exp={},exp8={};
+function fixStats(months){
+  months=months||['2026-06','2026-07','2026-08'];
+  const exp={},exp8={},inc={};
   months.forEach(m=>{
+    inc[m]=S.transactions.filter(t=>t.tp==='income'&&mk(t.d)===m).reduce((s,t)=>s+txToMXN(t),0);
     const tx=S.transactions.filter(t=>t.tp==='expense'&&mk(t.d)===m);
     exp[m]=tx.reduce((s,t)=>s+realExpenseMXN(t),0);
     exp8[m]=tx.filter(t=>txScope(t)==='8a5').reduce((s,t)=>s+realExpenseMXN(t),0);
   });
   const bal={};
   S.accounts.forEach(a=>{bal[a.name]=calcAccBalance(a.id)});
-  return {exp,exp8,bal,pat:totalPatrimonio(currentMonth()).total};
+  return {exp,exp8,inc,bal,pat:totalPatrimonio(currentMonth()).total};
 }
 function withState(st,fn){
   const keep={transactions:S.transactions,transfers:S.transfers,accounts:S.accounts};
   S.transactions=st.transactions;S.transfers=st.transfers;S.accounts=st.accounts;
   try{return fn()}finally{Object.assign(S,keep)}
 }
-function openFixMundial(){
-  const plan=fixMundialPlan();
-  const before=fixStats();
+// ── Second one-time fix: reimbursements with a name that went through the Reembolsos pouch (Jan–Jun 2026) ──
+// Each pouch transfer becomes a real reimbursement linked to the expense it paid back; that expense becomes shared.
+// Whatever they gave beyond the cost is income in "Otros ingresos". Confirmed one by one with Rodrigo.
+const FIX_REEMB_KEY='fixReembolsosNombre';
+const FIX_REEMB_ITEMS=[
+  {tr:'tr_mmd6b42h84spl',person:'Mamá',alloc:[['mmel0ly6kah8d',1786.47],['mmel1n7x9oqmf',893.53]]}, // flight: half of 3 MSI (1st was in Dec 2025)
+  {tr:'tr_mmei846vbwup9',person:'Tacos tranquis',alloc:[['mmekqdbcblea4',560]]},
+  {tr:'tr_mmeij1e3lh08u',person:'Ubers CDMX',prop:['mmd2y6gmnv9w6','mmd2yrijmiefi','mmd3c3x91jkcs','mmd3chjdz7wha','mmd36t1rup4jt','mmd374zffu0xa','mmd37lwxae91w','mmd37xtzju15b']},
+  {tr:'tr_mmej1tbrwcjoe',person:'Diana',alloc:[['mmekwxo9534rd',320]]},
+  {tr:'tr_mmej7i79d0yft',person:'Victor',alloc:[['mmej75416g0oh',280]]},
+  {tr:'tr_mmejgx22mia83',person:'Comida estadio',alloc:[['mmd3q1xaf4gl6',592]]},
+  {tr:'tr_mn2tlhg47uk5',person:'Comida rayados',alloc:[['mn2tkyqij3ni',575.5]]},
+  {tr:'tr_mncsi30codfy',person:'Tortas',alloc:[['mn2u8u9zecis',400]]},
+  {tr:'tr_moqy7z2cgbkt',person:'Josephinos',alloc:[['moqyj6p67s6j',260]]},
+  {tr:'tr_mowjwpumk00k',person:'Koke',alloc:[['mowjw7gphlcz',500]]},
+  {tr:'tr_mp2b9z0th3yi',person:'Día de las madres',alloc:[['mp2b8vdh4b1e',3600],['mq43yv82nluu',819],['mp2beescddcv',44],['mp2bes4m9gfn',10]]},
+  {tr:'tr_mpxq3ivqk2d5',person:'Mamá (vía Edy)',alloc:[['mpxq424bmyrn',1058]]}, // Edy lent it for mamá's business; mamá paid Edy
+];
+function fixReembolsosPlan(){
+  const errors=[],ops=[],notes=[];
+  const reemb=S.accounts.find(a=>a.name.trim()==='Reembolsos');
+  if(!reemb){errors.push('No encontré la cuenta Reembolsos');return {errors,ops,notes}}
+  const r2=v=>Math.round(v*100)/100;
+  let shift=0,extra=0;
+  FIX_REEMB_ITEMS.forEach(it=>{
+    const tr=S.transfers.find(t=>t.id===it.tr);
+    if(!tr){errors.push(`No encontré el reembolso ${it.person}`);return}
+    if(tr.from!==reemb.id){errors.push(`"${tr.desc}" ya no sale de Reembolsos`);return}
+    let alloc=it.alloc;
+    if(it.prop){ // split proportionally to each expense
+      const txs=it.prop.map(id=>S.transactions.find(t=>t.id===id));
+      if(txs.some(t=>!t)){errors.push(`Faltan gastos de ${it.person}`);return}
+      const sum=txs.reduce((s,t)=>s+t.a,0);
+      alloc=txs.map(t=>[t.id,r2(t.a/sum*tr.amount)]);
+      alloc[alloc.length-1][1]=r2(tr.amount-alloc.slice(0,-1).reduce((s,a)=>s+a[1],0));
+    }
+    const covered=r2(alloc.reduce((s,a)=>s+a[1],0));
+    const excess=r2(tr.amount-covered);
+    if(excess<-0.004){errors.push(`${it.person}: lo repartido supera lo que te dieron`);return}
+    let lastTx=null;
+    for(const [id,a] of alloc){
+      const t=S.transactions.find(x=>x.id===id);
+      if(!t||t.tp!=='expense'){errors.push(`No encontré el gasto de ${it.person} (${id})`);return}
+      if(t.shared&&t.shared.enabled){errors.push(`"${t.ds}" ya es compartido`);return}
+      if(a>t.a+0.004){errors.push(`"${t.ds}": ${fmt(a)} es más que el gasto`);return}
+      lastTx=t;
+      ops.push({k:'updTx',id,data:{shared:{enabled:true,mode:'custom',total:t.a,myShare:r2(t.a-a),excess:0,
+        people:[{name:it.person,amount:a,paidAmount:a,paid:true,absorbed:false}]}}});
+      ops.push({k:'addTr',id:'fx2_'+it.tr+'_'+id,data:{from:null,to:tr.to,type:'reimbursement',amount:a,d:tr.d,
+        desc:'Reembolso: '+it.person+' - '+t.ds,txId:id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
+    }
+    if(excess>0.004){
+      extra+=excess;
+      ops.push({k:'addTx',id:'fx2_exc_'+it.tr,data:{tp:'income',a:excess,ds:'Excedente: '+(tr.desc||it.person),c:otherIncomeCategoryId(),acc:tr.to,d:tr.d,currency:'MXN',txId:lastTx.id}});
+    }
+    ops.push({k:'delTr',id:tr.id});
+    shift+=tr.amount;
+  });
+  shift=r2(shift);
+  ops.push({k:'updAcc',id:reemb.id,data:{initialBalance:r2((reemb.initialBalance||0)-shift)}});
+  notes.push(`${FIX_REEMB_ITEMS.length} reembolsos por ${fmt(shift)} pasan a estar ligados a su gasto; lo que te dieron de más (${fmt(extra)}) entra a "Otros ingresos".`);
+  notes.push(`Saldo inicial de Reembolsos: ${fmt(reemb.initialBalance||0)} → ${fmt((reemb.initialBalance||0)-shift)}`);
+  return {errors,ops,notes};
+}
+
+// Registry of one-time fixes shown in Ajustes
+const FIXES={
+  mundial:{key:FIX_MUNDIAL_KEY,title:'Boletos del Mundial y apuestas (jun–ago)',plan:()=>fixMundialPlan(),
+    intro:()=>`<b>Apuestas:</b> nueva cuenta "Malas Decisiones". Los depósitos pasan de gasto a traspaso; 4 ganancias salen de esa cuenta; un gasto por la pérdida real de junio y otro de julio.<br>
+    <b>Argentina:</b> gasto compartido, tu parte $19,096 (Edy y tu papá $19,096 cada uno), con los pagos de Edy como reembolsos en sus fechas.<br>
+    <b>Portugal:</b> tu boleto de $10,200 como gasto en Mundial, pagado cruzándolo con lo que te debía tu papá.<br>
+    <b>Estampas de Edy:</b> $1,050 como gasto en Album mundial, pagado cruzándolo con lo que te debía de los boletos.`,
+    months:['2026-06','2026-07','2026-08']},
+  reembolsos:{key:FIX_REEMB_KEY,title:'Reembolsos con nombre (ene–jun)',plan:()=>fixReembolsosPlan(),
+    intro:()=>`Vuelo CDMX (tu mamá, la mitad), tacos tranquis, ubers del viaje, publicidad de Diana, cervecería con Victor, comida del estadio, comida rayados, tortas, Josephinos, sobres de Koke, día de las madres y las notas de tu mamá: cada gasto queda compartido y el reembolso ligado a él.`,
+    months:['2026-01','2026-02','2026-03','2026-05','2026-06']},
+};
+let _fixOpen=null;
+function openFix(kind){
+  const F=FIXES[kind];_fixOpen=kind;
+  const plan=F.plan();
+  const before=fixStats(F.months);
   const copy={transactions:JSON.parse(JSON.stringify(S.transactions)),transfers:JSON.parse(JSON.stringify(S.transfers)),accounts:JSON.parse(JSON.stringify(S.accounts))};
-  const after=withState(fixApplyLocal(copy,plan.ops),fixStats);
-  const cnt=k=>plan.ops.filter(o=>o.k===k).length;
+  const after=withState(fixApplyLocal(copy,plan.ops),()=>fixStats(F.months));
   const row=(l,a,b)=>`<div class="flex-between text-xs" style="padding:3px 0"><span>${l}</span><span class="text-mono">${fmt0(a)} → <b>${fmt0(b)}</b></span></div>`;
   const changedBal=Object.keys(before.bal).filter(n=>Math.abs((before.bal[n]||0)-(after.bal[n]||0))>0.005);
   let h=plan.errors.length?`<div class="card" style="border:2px solid var(--red)"><div class="text-sm fw-600" style="color:var(--red)">No se puede aplicar</div>${plan.errors.map(e=>`<div class="text-xs mt-4">• ${e}</div>`).join('')}</div>`:'';
-  h+=`<div class="text-xs" style="color:var(--txt2);line-height:1.5">
-    <b>Apuestas:</b> nueva cuenta "Malas Decisiones". ${cnt('delTx')} depósitos pasan de gasto a traspaso; 4 ganancias salen de esa cuenta; un gasto por la pérdida real de junio y otro de julio.<br>
-    <b>Argentina:</b> gasto compartido, tu parte $19,096 (Edy y tu papá $19,096 cada uno), con los pagos de Edy como reembolsos en sus fechas.<br>
-    <b>Portugal:</b> tu boleto de $10,200 como gasto en Mundial, pagado cruzándolo con lo que te debía tu papá.<br>
-    <b>Estampas de Edy:</b> $1,050 como gasto en Album mundial, pagado cruzándolo con lo que te debía de los boletos.<br>
-    ${plan.notes.map(n=>'• '+n).join('<br>')}</div>
+  h+=`<div class="text-xs" style="color:var(--txt2);line-height:1.5">${F.intro()}<br>${plan.notes.map(n=>'• '+n).join('<br>')}</div>
     <div class="text-sm fw-600 mt-8">Gastos del mes (todo)</div>
-    ${['2026-06','2026-07','2026-08'].map(m=>row(monthName(m),before.exp[m],after.exp[m])).join('')}
+    ${F.months.map(m=>row(monthName(m),before.exp[m],after.exp[m])).join('')}
     <div class="text-sm fw-600 mt-8">Gastos de 8 a 5</div>
-    ${['2026-06','2026-07','2026-08'].map(m=>row(monthName(m),before.exp8[m],after.exp8[m])).join('')}
+    ${F.months.map(m=>row(monthName(m),before.exp8[m],after.exp8[m])).join('')}
+    <div class="text-sm fw-600 mt-8">Ingresos del mes</div>
+    ${F.months.map(m=>row(monthName(m),before.inc[m],after.inc[m])).join('')}
     <div class="text-sm fw-600 mt-8">Saldos</div>
     ${row('Patrimonio',before.pat,after.pat)}
     <div class="text-xs" style="color:${changedBal.length?'var(--red)':'var(--green)'}">${changedBal.length?'Cambian: '+changedBal.join(', '):'Ninguna cuenta cambia de saldo'}</div>`;
+  document.getElementById('fixTitle').textContent=F.title;
   document.getElementById('fixBody').innerHTML=h;
   const btn=document.getElementById('fixApplyBtn');
   btn.disabled=!!plan.errors.length;btn.style.opacity=plan.errors.length?.4:1;
   openModal('fixModal');
 }
-async function applyFixMundial(){
-  const plan=fixMundialPlan();
+function openFixMundial(){openFix('mundial')}
+async function applyFix(kind){
+  kind=kind||_fixOpen;const F=FIXES[kind];
+  const plan=F.plan();
   if(plan.errors.length){alert('No se puede aplicar:\n'+plan.errors.join('\n'));return}
   if(!navigator.onLine){alert('Necesitas internet para aplicar la corrección');return}
   const btn=document.getElementById('fixApplyBtn');btn.disabled=true;btn.textContent='Aplicando…';
@@ -3623,10 +3703,11 @@ async function applyFixMundial(){
       if(o.k==='updTx') await fsUpdate('transactions',o.id,o.data);
       if(o.k==='addTr') await fsSet('transfers',o.id,o.data);
       if(o.k==='updTr') await fsUpdate('transfers',o.id,o.data);
+      if(o.k==='delTr') await fsDel('transfers',o.id);
     }
     fixApplyLocal(S,plan.ops);
-    S.meta[FIX_MUNDIAL_KEY]=today();
-    await fsDoc('meta/status',{[FIX_MUNDIAL_KEY]:today()});
+    S.meta[F.key]=today();
+    await fsDoc('meta/status',{[F.key]:today()});
     closeModal('fixModal');
     R();
     alert('Corrección aplicada');
@@ -3635,13 +3716,17 @@ async function applyFixMundial(){
     alert('Se detuvo a la mitad por un error: '+e.message+'\nNo vuelvas a aplicarla; avísame para revisarlo.');
   }finally{btn.textContent='Aplicar';}
 }
+function applyFixMundial(){return applyFix('mundial')}
+// Cards in Ajustes: pending fixes first (to review), applied ones as a short line
 function fixMundialCardHTML(){
-  if(S.meta&&S.meta[FIX_MUNDIAL_KEY]) return `<div class="card"><div class="text-sm fw-600">✅ Corrección de boletos del Mundial y apuestas</div><div class="text-xs mt-4" style="color:var(--txt3)">Aplicada el ${S.meta[FIX_MUNDIAL_KEY]}</div></div>`;
-  return `<div class="card" style="border:2px solid var(--accent)">
-    <div class="text-sm fw-600">Corrección pendiente: boletos del Mundial y apuestas (jun–ago)</div>
-    <div class="text-xs mt-4" style="color:var(--txt2)">Revisa los cambios antes de aplicarlos. No se aplica nada hasta que confirmes.</div>
-    <button class="btn btn-sm btn-primary mt-8" style="width:100%" onclick="openFixMundial()">Ver cambios</button>
-  </div>`;
+  return Object.entries(FIXES).map(([kind,F])=>{
+    if(S.meta&&S.meta[F.key]) return `<div class="card" style="padding:10px 16px"><div class="text-xs">✅ ${F.title} · aplicada el ${S.meta[F.key]}</div></div>`;
+    return `<div class="card" style="border:2px solid var(--accent)">
+      <div class="text-sm fw-600">Corrección pendiente: ${F.title}</div>
+      <div class="text-xs mt-4" style="color:var(--txt2)">Revisa los cambios antes de aplicarlos. No se aplica nada hasta que confirmes.</div>
+      <button class="btn btn-sm btn-primary mt-8" style="width:100%" onclick="openFix('${kind}')">Ver cambios</button>
+    </div>`;
+  }).join('');
 }
 
 // ═══════════════════════════════════════
