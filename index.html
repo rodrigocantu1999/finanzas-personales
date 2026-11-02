@@ -149,11 +149,11 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
 /* Bulk selection */
 
 /* Category grid */
-.cat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-height:300px;overflow-y:auto}
+.cat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-height:300px;overflow-y:auto}
 .cat-grid-item{display:flex;flex-direction:column;align-items:center;padding:10px 4px;border-radius:var(--radius-sm);cursor:pointer;text-align:center;border:2px solid transparent;transition:.2s}
 .cat-grid-item:hover,.cat-grid-item.selected{border-color:var(--accent);background:var(--bg3)}
 .cat-grid-item .cat-emoji{font-size:1.5rem;margin-bottom:4px}
-.cat-grid-item .cat-name{font-size:.65rem;color:var(--txt2);line-height:1.2;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cat-grid-item .cat-name{font-size:.7rem;color:var(--txt2);line-height:1.2;max-width:100%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 
 /* Color picker */
 .color-picker{display:flex;flex-wrap:wrap;gap:8px}
@@ -653,7 +653,9 @@ function accCurrency(accId){
 function isUSD(accId){return accCurrency(accId)==='USD'}
 function getCat(id){return S.categories.find(c=>c.id===id)||{name:'Sin cat',emoji:'❓',color:'#64748B'}}
 function getAcc(id){return S.accounts.find(a=>a.id===id)||{name:'?',icon:'❓',color:'#64748B'}}
-function today(){return new Date().toISOString().split('T')[0]}
+// Local date (YYYY-MM-DD). toISOString() is UTC, which in Mexico turns into tomorrow after 6 pm.
+function localDate(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function today(){return localDate(new Date())}
 function currentMonth(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')}
 function monthName(m){const[y,mo]=m.split('-');const names=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];return names[parseInt(mo)-1]+' '+y}
 function prevMonth(m){const[y,mo]=m.split('-').map(Number);return mo===1?(y-1)+'-12':y+'-'+String(mo-1).padStart(2,'0')}
@@ -671,6 +673,47 @@ function realExpenseMXN(tx){
   }
   return txToMXN(tx);
 }
+
+// ── Usage-based ordering ──
+// How many movements used each account / category in the last 90 days.
+const USE_WINDOW_DAYS=90;
+function useCounts(){
+  const from=localDate(new Date(Date.now()-USE_WINDOW_DAYS*864e5));
+  const acc={},cat={};
+  S.transactions.forEach(t=>{
+    if(t.d<from) return;
+    if(t.acc) acc[t.acc]=(acc[t.acc]||0)+1;
+    if(t.c) cat[t.c]=(cat[t.c]||0)+1;
+  });
+  S.transfers.forEach(t=>{
+    if(t.d<from) return;
+    if(t.from) acc[t.from]=(acc[t.from]||0)+1;
+    if(t.to) acc[t.to]=(acc[t.to]||0)+1;
+  });
+  return {acc,cat};
+}
+// Accounts, most used first (ties keep their usual order).
+function accountsByUse(){
+  const n=useCounts().acc;
+  return S.accounts.map((a,i)=>({a,i})).sort((x,y)=>(n[y.a.id]||0)-(n[x.a.id]||0)||x.i-y.i).map(x=>x.a);
+}
+// Categories (optionally of one type), most used first, then alphabetical.
+function categoriesByUse(type){
+  const n=useCounts().cat;
+  return S.categories.filter(c=>!type||c.type===type)
+    .sort((x,y)=>(n[y.id]||0)-(n[x.id]||0)||x.name.localeCompare(y.name,'es'));
+}
+// Account to preselect for a new expense/income: the one used last for that type.
+function lastUsedAccount(tp){
+  let id=null;
+  try{id=localStorage.getItem('lastAcc_'+tp)}catch(e){}
+  if(id&&S.accounts.some(a=>a.id===id)) return id;
+  // No record on this device yet: take the most recent movement of that type
+  let best=null;
+  S.transactions.forEach(t=>{if(t.tp===tp&&t.acc&&(!best||t.d>=best.d)) best=t;});
+  return best&&S.accounts.some(a=>a.id===best.acc)?best.acc:(accountsByUse()[0]||{}).id;
+}
+function rememberAccount(tp,accId){try{localStorage.setItem('lastAcc_'+tp,accId)}catch(e){}}
 
 // Colors
 const COLORS=['#C81E1E','#C05621','#B45309','#16803C','#059669','#0D9488','#0891B2','#1D4ED8','#6D28D9','#7C3AED','#DB2777','#E11D48','#92400E','#EA580C','#16A34A'];
@@ -1093,16 +1136,16 @@ function renderMovs(){
 
   // Account filter chips
   let ahtml=`<div class="chip ${S.movsAccFilter==='all'?'active':''}" onclick="setMovsFilter('acc','all')">Todas cuentas</div>`;
-  S.accounts.forEach(acc=>{
+  accountsByUse().forEach(acc=>{
     ahtml+=`<div class="chip ${S.movsAccFilter===acc.id?'active':''}" onclick="setMovsFilter('acc','${acc.id}')">${acc.icon} ${acc.name}</div>`;
   });
   document.getElementById('movsAccFilter').innerHTML=ahtml;
 
-  // Category filter chips
+  // Category filter chips: most used first, expenses and income each sorted on their own
   let chtml=`<div class="chip ${S.movsCatFilter==='all'?'active':''}" onclick="setMovsFilter('cat','all')">Todas cat.</div>`;
   const filterType=S.movsTypeFilter;
-  const catsToShow=filterType==='income'?S.categories.filter(c=>c.type==='income'):
-    filterType==='expense'?S.categories.filter(c=>c.type==='expense'):S.categories;
+  const catsToShow=filterType==='income'?categoriesByUse('income'):
+    filterType==='expense'?categoriesByUse('expense'):[...categoriesByUse('expense'),...categoriesByUse('income')];
   catsToShow.forEach(cat=>{
     chtml+=`<div class="chip ${S.movsCatFilter===cat.id?'active':''}" onclick="setMovsFilter('cat','${cat.id}')">${cat.emoji} ${cat.name}</div>`;
   });
@@ -1286,9 +1329,9 @@ function markPaid(txId,personIdx){
   const isU=tx.currency==='USD';
   document.getElementById('markPaidInfo').innerHTML=`<strong>${person.name}</strong> te paga <strong>${isU?fmt(person.amount,'USD'):fmt(person.amount)}</strong> por "${tx.ds}"`;
 
-  // Build account list
+  // Build account list (most used first)
   let html='';
-  S.accounts.forEach(acc=>{
+  accountsByUse().forEach(acc=>{
     html+=`<button class="btn" style="width:100%;padding:12px;text-align:left;background:var(--card2);border:1px solid var(--border);display:flex;align-items:center;gap:10px" onclick="confirmMarkPaid('${acc.id}')">
       <span style="font-size:1.2rem">${acc.icon}</span>
       <span class="fw-500">${acc.name}</span>
@@ -1923,7 +1966,9 @@ function openTxModal(type,editId){
 
   // Account select
   const accSel=document.getElementById('txAcc');
-  accSel.innerHTML=S.accounts.map(a=>`<option value="${a.id}" ${tx&&tx.acc===a.id?'selected':''}>${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
+  // Most used accounts first; a new movement starts on the account last used for its type
+  const defAcc=tx?tx.acc:lastUsedAccount(S.txType);
+  accSel.innerHTML=accountsByUse().map(a=>`<option value="${a.id}" ${a.id===defAcc?'selected':''}>${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
 
   // Check if selected account is USD
   const selectedAcc=tx?tx.acc:accSel.value;
@@ -1964,10 +2009,16 @@ function setTxType(type){
     el.classList.toggle('active',el.dataset.tp===type);
   });
   renderTxCatGrid(null);
+  // Switching between gasto/ingreso on a new movement jumps to that type's last-used account
+  if(!document.getElementById('txEditId').value){
+    const accSel=document.getElementById('txAcc');
+    accSel.value=lastUsedAccount(type);
+    updateTxCurrency(accSel.value);
+  }
 }
 
 function renderTxCatGrid(selectedId){
-  const cats=S.categories.filter(c=>c.type===S.txType);
+  const cats=categoriesByUse(S.txType);
   document.getElementById('txCatGrid').innerHTML=cats.map(c=>
     `<div class="cat-grid-item ${c.id===selectedId?'selected':''}" data-catid="${c.id}" onclick="document.querySelectorAll('#txCatGrid .cat-grid-item').forEach(el=>el.classList.remove('selected'));this.classList.add('selected')">
       <div class="cat-emoji">${c.emoji}</div><div class="cat-name">${c.name}</div>
@@ -2058,6 +2109,7 @@ async function saveTx(){
     d:document.getElementById('txDate').value||today(),
     currency:S.txCurrency,
   };
+  if(!editId) rememberAccount(data.tp,data.acc);
 
   // USD fields
   if(S.txCurrency==='USD'){
@@ -2149,7 +2201,7 @@ function openTrModal(editId){
     el.classList.toggle('active',el.dataset.trtype===S.trType);
   });
 
-  const accOpts=S.accounts.map(a=>`<option value="${a.id}">${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
+  const accOpts=accountsByUse().map(a=>`<option value="${a.id}">${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
   document.getElementById('trFrom').innerHTML=accOpts;
   document.getElementById('trTo').innerHTML=accOpts;
 
