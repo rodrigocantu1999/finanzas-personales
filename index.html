@@ -404,6 +404,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
   <div class="form-group"><label>Descripcion</label><input type="text" id="txDesc" autocomplete="off"></div>
   <div class="form-group"><label>Categoria</label><div class="cat-grid" id="txCatGrid"></div></div>
   <div class="form-group"><label>Cuenta</label><select id="txAcc"></select></div>
+  <div class="form-group"><label>Ámbito</label><select id="txScope"></select></div>
   <div class="form-group"><label>Fecha</label><input type="date" id="txDate"></div>
   <!-- Shared toggle -->
   <div class="toggle-row"><label style="margin:0">Gasto compartido</label><button class="toggle" id="txSharedToggle" onclick="toggleShared()"></button></div>
@@ -479,6 +480,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
   </div>
   <div class="form-group"><label>Nombre</label><input type="text" id="catName"></div>
   <div class="form-group"><label>Emoji</label><input type="text" id="catEmoji" maxlength="4" style="width:60px;text-align:center;font-size:1.5rem"></div>
+  <div class="form-group"><label>Ámbito</label><select id="catScope"><option value="8a5">8 a 5 (incluye gastos personales)</option><option value="papas">Papás</option><option value="negocio">Negocio</option></select></div>
   <div class="form-group"><label>Color</label><div class="color-picker" id="catColorPicker"></div></div>
   <div style="margin-top:16px;display:flex;gap:8px">
     <button class="btn btn-primary" style="flex:1" onclick="saveCat()">Guardar</button>
@@ -616,6 +618,7 @@ let S={
   accounts:[],categories:[],transactions:[],transfers:[],debts:[],goals:[],budgets:{},
   exchangeRates:{},meta:{},
   erUnlocked:{},
+  scope:(()=>{try{return localStorage.getItem('scope')||'all'}catch(e){return 'all'}})(),
   month:'',year:0,
   currentTab:'tabInicio',
   movsTypeFilter:'all',movsAccFilter:'all',movsCatFilter:'all',
@@ -674,6 +677,74 @@ function realExpenseMXN(tx){
     return share;
   }
   return txToMXN(tx);
+}
+
+// ── Ámbitos: which part of your life each movement belongs to ──
+// Personal spending lives in "8 a 5": the rule is that it should fit inside that income.
+const SCOPES=[{id:'8a5',name:'8 a 5'},{id:'papas',name:'Papás'},{id:'negocio',name:'Negocio'}];
+// Defaults for categories that have no ámbito saved yet (matched by name, lower-case)
+const SCOPE_DEFAULTS={
+  papas:['clientes vistos','scaners','vta tarjetas burlington','armado de manifiestos','sorteo manifiestos','cobranza manif'],
+  negocio:['clientes personales','pago de notas','manif cobrados mios','manif cobrados mios tdr burlington'],
+};
+function scopeName(id){return id==='all'?'Todo':(SCOPES.find(s=>s.id===id)||{name:id}).name}
+function catScope(cid){
+  const c=S.categories.find(x=>x.id===cid);
+  if(c&&c.scope) return c.scope;
+  const n=(c?c.name:'').trim().toLowerCase();
+  if(SCOPE_DEFAULTS.papas.includes(n)) return 'papas';
+  if(SCOPE_DEFAULTS.negocio.includes(n)) return 'negocio';
+  return '8a5';
+}
+// A movement can override its category's ámbito
+function txScope(t){return t.scope||catScope(t.c)}
+// Is this movement visible under the ámbito picked in the selector?
+function inScope(t){return S.scope==='all'||txScope(t)===S.scope}
+function setScope(s){
+  S.scope=s;
+  try{localStorage.setItem('scope',s)}catch(e){}
+  R();
+}
+function fmt0(n){return (n<0?'−':'')+'$'+Math.round(Math.abs(n||0)).toLocaleString('es-MX')}
+// Income and (real) expenses per ámbito for a list of movements, in MXN
+function scopeTotals(txs){
+  const r={};SCOPES.forEach(s=>r[s.id]={inc:0,exp:0});
+  txs.forEach(t=>{
+    const s=r[txScope(t)]||(r[txScope(t)]={inc:0,exp:0});
+    if(t.tp==='income') s.inc+=txToMXN(t); else s.exp+=realExpenseMXN(t);
+  });
+  return r;
+}
+function scopeSelectorHTML(){
+  return `<div class="chips-row" style="margin-bottom:10px">${[{id:'all',name:'Todo'},...SCOPES].map(s=>
+    `<div class="chip ${S.scope===s.id?'active':''}" onclick="setScope('${s.id}')">${s.name}</div>`).join('')}</div>`;
+}
+// "How much of your 8 a 5 income did you spend" bar
+function salaryBarHTML(inc,exp){
+  const p=inc?Math.round(exp/inc*100):0;
+  const col=!inc||p>100?'var(--red)':p>90?'var(--yellow)':'var(--green)';
+  return `<div class="mt-8">
+    <div class="flex-between text-xs"><span>Gastaste el <b>${inc?p+'%':'—'}</b> de tu ingreso de 8 a 5</span><span class="text-mono">${fmt0(exp)} / ${fmt0(inc)}</span></div>
+    <div class="progress" style="margin-top:4px"><div class="progress-bar" style="width:${Math.min(p,100)}%;background:${col}"></div></div>
+    <div class="text-xs mt-4" style="color:${col}">${!inc?'Sin ingreso de 8 a 5 este mes':p>100?'Te pasaste por '+fmt0(exp-inc):'Te quedan '+fmt0(inc-exp)}</div>
+  </div>`;
+}
+// Table: income, expenses and result per ámbito + consolidated, with each one's % of total income and expenses
+function scopeSummaryHTML(txs,title){
+  const t=scopeTotals(txs);
+  const totInc=SCOPES.reduce((s,x)=>s+t[x.id].inc,0),totExp=SCOPES.reduce((s,x)=>s+t[x.id].exp,0);
+  const cell=(v,p,cls)=>`<div style="text-align:right"><div class="text-mono ${cls||''}" style="font-size:.78rem">${fmt0(v)}</div>${p!==null?`<div style="font-size:.62rem;color:var(--txt3)">${p}%</div>`:''}</div>`;
+  const row=(name,inc,exp,bold)=>`<div style="display:grid;grid-template-columns:62px repeat(3,minmax(0,1fr));gap:6px;align-items:start;padding:7px 0;${bold?'border-top:2px solid var(--border);font-weight:700':'border-top:1px solid var(--border)'}">
+      <div style="font-size:.8rem">${name}</div>
+      ${cell(inc,bold?null:pct(inc,totInc),'text-green')}${cell(exp,bold?null:pct(exp,totExp),'text-red')}${cell(inc-exp,null,inc-exp>=0?'text-green':'text-red')}
+    </div>`;
+  return `<div class="card">
+    <div class="text-sm fw-600 mb-4">${title}</div>
+    <div style="display:grid;grid-template-columns:62px repeat(3,minmax(0,1fr));gap:6px;font-size:.65rem;color:var(--txt3);text-align:right"><div></div><div>Ingresos<br>% del total</div><div>Gastos<br>% del total</div><div>Resultado</div></div>
+    ${SCOPES.map(s=>row(s.name,t[s.id].inc,t[s.id].exp)).join('')}
+    ${row('Total',totInc,totExp,true)}
+    ${salaryBarHTML(t['8a5'].inc,t['8a5'].exp)}
+  </div>`;
 }
 
 // ── Usage-based ordering ──
@@ -969,8 +1040,10 @@ function donutCardHTML(title,centerLabel,catCount,total,slices,listHTML){
 
 function renderDash(){
   const m=S.month;const pm=prevMonth(m);
-  const txM=S.transactions.filter(t=>mk(t.d)===m);
-  const txPM=S.transactions.filter(t=>mk(t.d)===pm);
+  const txMAll=S.transactions.filter(t=>mk(t.d)===m);
+  // Everything below follows the ámbito selector (accounts, net worth, debts and "Te deben" stay complete)
+  const txM=txMAll.filter(inScope);
+  const txPM=S.transactions.filter(t=>mk(t.d)===pm&&inScope(t));
   const tc=getTC(m);
 
   // Income/Expense for month (all converted to MXN, using realExpense for shared)
@@ -1003,6 +1076,7 @@ function renderDash(){
   // Budget summary
   let budTotal=0,budSpent=0;
   Object.entries(S.budgets).forEach(([cid,amt])=>{
+    if(S.scope!=='all'&&catScope(cid)!==S.scope) return;
     budTotal+=amt;
     txM.filter(t=>t.tp==='expense'&&t.c===cid).forEach(t=>{budSpent+=realExpenseMXN(t)});
   });
@@ -1019,10 +1093,10 @@ function renderDash(){
   const totalExp=catEntries.reduce((s,e)=>s+e[1],0);
   const catCount=catEntries.length;
 
-  let html=`
+  let html=scopeSelectorHTML()+(S.scope==='all'?scopeSummaryHTML(txMAll,'Por ámbito · '+monthName(m)):'')+`
   <!-- Hero Balance Card -->
   <div class="hero-card">
-    <div class="hero-label">Balance de ${monthName(m)}</div>
+    <div class="hero-label">Balance de ${monthName(m)}${S.scope!=='all'?' · '+scopeName(S.scope):''}</div>
     <div class="hero-amount">${fmt(balance)}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
       <div class="sub-card">
@@ -1046,11 +1120,12 @@ function renderDash(){
       </div>
     </div>
   </div>
+  ${S.scope==='8a5'?`<div class="card">${salaryBarHTML(incMXN,expMXN)}</div>`:''}
 
-  <!-- Budget Summary -->
-  <div class="card">
+  <!-- Budget Summary (hidden in an ámbito with no budgets) -->
+  ${budTotal>0||S.scope==='all'?`<div class="card">
     <div class="flex-between mb-4">
-      <div class="text-sm fw-600">Presupuesto</div>
+      <div class="text-sm fw-600">Presupuesto${S.scope!=='all'?' · '+scopeName(S.scope):''}</div>
       <div class="badge ${budPct>100?'badge-red':budPct>80?'badge-yellow':'badge-green'}">${budPct}%</div>
     </div>
     <div class="progress"><div class="progress-bar" style="width:${Math.min(budPct,100)}%;background:${budPct>100?'var(--red)':budPct>80?'var(--yellow)':'var(--green)'}"></div></div>
@@ -1058,7 +1133,7 @@ function renderDash(){
       <span class="text-xs" style="color:var(--txt2)">${fmt(budSpent)} / ${fmt(budTotal)}</span>
       <span class="text-xs fw-600" style="color:${budAvail>=0?'var(--green)':'var(--red)'}">${budAvail<0?'Excedido: '+fmt(Math.abs(budAvail)):'Disponible: '+fmt(budAvail)}</span>
     </div>
-  </div>
+  </div>`:''}
 
   <!-- Accounts Scroll -->
   <div class="card">
@@ -1787,11 +1862,35 @@ function renderMetas(){
 // ═══════════════════════════════════════
 // RENDER: ANALISIS
 // ═══════════════════════════════════════
+// Análisis: result (income − expenses) of each ámbito for the last 6 months up to `m`, plus the last-3-months sum.
+// Tap a month to open it.
+function scopeMonthlyHTML(m){
+  const months=[];let x=m;for(let i=0;i<6;i++){months.unshift(x);x=prevMonth(x);}
+  const rows=months.map(mo=>({mo,t:scopeTotals(S.transactions.filter(t=>mk(t.d)===mo))}));
+  const res=(t,id)=>t[id].inc-t[id].exp;
+  const tot=t=>SCOPES.reduce((s,x)=>s+res(t,x.id),0);
+  const k=v=>(v<-0.5?'−':'')+'$'+(Math.abs(v)>=1000?(Math.abs(v)/1000).toFixed(1)+'K':Math.round(Math.abs(v)));
+  const cell=(v,b)=>`<div class="text-mono ${v>=0?'text-green':'text-red'}" style="text-align:right;font-size:.75rem;${b?'font-weight:700':''}">${k(v)}</div>`;
+  const grid='display:grid;grid-template-columns:58px repeat(4,minmax(0,1fr));gap:6px;padding:6px 0;align-items:center';
+  const last3=rows.slice(-3);
+  const sum3=id=>last3.reduce((s,r)=>s+res(r.t,id),0);
+  return `<div class="card">
+    <div class="text-sm fw-600 mb-4">Resultado por ámbito</div>
+    <div class="text-xs mb-8" style="color:var(--txt3)">Ingresos menos gastos de cada mes</div>
+    <div style="${grid};font-size:.65rem;color:var(--txt3);text-align:right"><div></div>${SCOPES.map(s=>`<div>${s.name}</div>`).join('')}<div>Total</div></div>
+    ${rows.map(r=>`<div style="${grid};border-top:1px solid var(--border);cursor:pointer;${r.mo===m?'background:var(--bg3);border-radius:6px':''}" onclick="S.month='${r.mo}';R()">
+      <div style="font-size:.75rem">${monthName(r.mo)}</div>${SCOPES.map(s=>cell(res(r.t,s.id))).join('')}${cell(tot(r.t),true)}</div>`).join('')}
+    <div style="${grid};border-top:2px solid var(--border)">
+      <div style="font-size:.7rem;font-weight:700">Últimos 3 meses</div>${SCOPES.map(s=>cell(sum3(s.id),true)).join('')}${cell(SCOPES.reduce((a,s)=>a+sum3(s.id),0),true)}</div>
+  </div>`;
+}
+
 function renderAnalisis(){
   const m=S.month;const pm=prevMonth(m);const y=m.substring(0,4);
-  const txM=S.transactions.filter(t=>mk(t.d)===m);
-  const txPM=S.transactions.filter(t=>mk(t.d)===pm);
-  const txY=S.transactions.filter(t=>t.d.substring(0,4)===y);
+  // Follows the ámbito selector
+  const txM=S.transactions.filter(t=>mk(t.d)===m&&inScope(t));
+  const txPM=S.transactions.filter(t=>mk(t.d)===pm&&inScope(t));
+  const txY=S.transactions.filter(t=>t.d.substring(0,4)===y&&inScope(t));
 
   // Month totals (MXN)
   let incM=0,expM=0,incPM=0,expPM=0;
@@ -1805,7 +1904,7 @@ function renderAnalisis(){
   let expUSD=0;
   txM.filter(t=>t.tp==='expense'&&t.currency==='USD').forEach(t=>{expUSD+=realExpense(t)});
 
-  let html=`
+  let html=scopeSelectorHTML()+(S.scope==='all'?scopeMonthlyHTML(m):'')+`
   <!-- KPIs -->
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Tasa de ahorro</div><div class="kpi-value ${saveRate>=0?'text-green':'text-red'}">${saveRate}%</div><div class="kpi-sub">${fmt(incM-expM)} ahorrado</div></div>
@@ -1991,7 +2090,7 @@ function renderAjustes(){
     html+=`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--border)">
       <div class="flex gap-8" style="align-items:center">
         <div style="width:32px;height:32px;border-radius:8px;background:${cat.color};display:flex;align-items:center;justify-content:center">${cat.emoji}</div>
-        <div><div class="text-sm fw-500">${cat.name}</div><div class="text-xs" style="color:var(--txt3)">${count} movimientos</div></div>
+        <div><div class="text-sm fw-500">${cat.name}</div><div class="text-xs" style="color:var(--txt3)">${count} movimientos · ${scopeName(catScope(cat.id))}</div></div>
       </div>
       <div class="flex gap-4">
         <button class="btn btn-xs btn-outline" onclick="openCatModal('${cat.id}')">Editar</button>
@@ -2015,7 +2114,7 @@ function renderAjustes(){
     html+=`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--border)">
       <div class="flex gap-8" style="align-items:center">
         <div style="width:32px;height:32px;border-radius:8px;background:${cat.color};display:flex;align-items:center;justify-content:center">${cat.emoji}</div>
-        <div><div class="text-sm fw-500">${cat.name}</div><div class="text-xs" style="color:var(--txt3)">${count} movimientos</div></div>
+        <div><div class="text-sm fw-500">${cat.name}</div><div class="text-xs" style="color:var(--txt3)">${count} movimientos · ${scopeName(catScope(cat.id))}</div></div>
       </div>
       <div class="flex gap-4">
         <button class="btn btn-xs btn-outline" onclick="openCatModal('${cat.id}')">Editar</button>
@@ -2099,6 +2198,7 @@ function openTxModal(type,editId){
 
   // Category grid
   renderTxCatGrid(tx?tx.c:null);
+  renderTxScope(tx&&tx.scope?tx.scope:'');
 
   // Shared
   S.sharedEnabled=tx&&tx.shared&&tx.shared.enabled||false;
@@ -2127,6 +2227,7 @@ function setTxType(type){
     el.classList.toggle('active',el.dataset.tp===type);
   });
   renderTxCatGrid(null);
+  renderTxScope();
   // Switching between gasto/ingreso on a new movement jumps to that type's last-used account
   if(!document.getElementById('txEditId').value){
     const accSel=document.getElementById('txAcc');
@@ -2135,10 +2236,20 @@ function setTxType(type){
   }
 }
 
+// Ámbito of the movement: "Según categoría" (default, nothing saved) or an explicit exception
+function renderTxScope(value){
+  const sel=document.getElementById('txScope');
+  const catEl=document.querySelector('#txCatGrid .cat-grid-item.selected');
+  const v=value!==undefined?value:sel.value;
+  sel.innerHTML=`<option value="">Según categoría${catEl?' ('+scopeName(catScope(catEl.dataset.catid))+')':''}</option>`+
+    SCOPES.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+  sel.value=v||'';
+}
+
 function renderTxCatGrid(selectedId){
   const cats=categoriesByUse(S.txType);
   document.getElementById('txCatGrid').innerHTML=cats.map(c=>
-    `<div class="cat-grid-item ${c.id===selectedId?'selected':''}" data-catid="${c.id}" onclick="document.querySelectorAll('#txCatGrid .cat-grid-item').forEach(el=>el.classList.remove('selected'));this.classList.add('selected')">
+    `<div class="cat-grid-item ${c.id===selectedId?'selected':''}" data-catid="${c.id}" onclick="document.querySelectorAll('#txCatGrid .cat-grid-item').forEach(el=>el.classList.remove('selected'));this.classList.add('selected');renderTxScope()">
       <div class="cat-emoji">${c.emoji}</div><div class="cat-name">${c.name}</div>
     </div>`
   ).join('');
@@ -2233,6 +2344,10 @@ async function saveTx(){
     currency:S.txCurrency,
   };
   if(!editId) rememberAccount(data.tp,data.acc);
+  // Ámbito exception (empty = follow the category)
+  const scopeSel=document.getElementById('txScope').value;
+  if(scopeSel) data.scope=scopeSel;
+  else if(editId) data.scope=firebase.firestore.FieldValue.delete();
 
   // USD fields
   if(S.txCurrency==='USD'){
@@ -2278,6 +2393,7 @@ async function saveTx(){
       if(data.shared&&typeof data.shared==='object'&&data.shared.enabled) localData.shared=data.shared;
       else localData.shared=null;
       S.transactions[idx]={...S.transactions[idx],...localData};
+      if(!scopeSel) delete S.transactions[idx].scope;
     }
   } else {
     const id=uid();
@@ -2541,6 +2657,7 @@ function openCatModal(editId){
 
   document.getElementById('catName').value=cat?cat.name:'';
   document.getElementById('catEmoji').value=cat?cat.emoji:'📋';
+  document.getElementById('catScope').value=cat?catScope(cat.id):'8a5';
   renderCatColorPicker(cat?cat.color:null);
 
   openModal('catModal');
@@ -2585,6 +2702,7 @@ async function saveCat(){
     type:S.catType,
     emoji:document.getElementById('catEmoji').value||'📋',
     color:selSw.dataset.color,
+    scope:document.getElementById('catScope').value||'8a5',
   };
 
   if(editId){
