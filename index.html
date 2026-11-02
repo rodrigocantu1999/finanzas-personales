@@ -3576,7 +3576,7 @@ function fixStats(months){
     exp8[m]=tx.filter(t=>txScope(t)==='8a5').reduce((s,t)=>s+realExpenseMXN(t),0);
   });
   const bal={};
-  S.accounts.forEach(a=>{bal[a.name]=calcAccBalance(a.id)});
+  S.accounts.forEach(a=>{bal[a.id]=calcAccBalance(a.id)}); // by id, so a renamed account still compares
   return {exp,exp8,inc,bal,pat:totalPatrimonio(currentMonth()).total};
 }
 function withState(st,fn){
@@ -3602,13 +3602,15 @@ const FIX_REEMB_ITEMS=[
   {tr:'tr_mp2b9z0th3yi',person:'Día de las madres',alloc:[['mp2b8vdh4b1e',3600],['mq43yv82nluu',819],['mp2beescddcv',44],['mp2bes4m9gfn',10]]},
   {tr:'tr_mpxq3ivqk2d5',person:'Mamá (vía Edy)',alloc:[['mpxq424bmyrn',1058]]}, // Edy lent it for mamá's business; mamá paid Edy
 ];
-function fixReembolsosPlan(){
+function fixReembolsosPlan(){return fixReimbPlan(FIX_REEMB_ITEMS,'fx2_')}
+// Generic: each pouch transfer becomes reimbursements linked to the expenses it paid back (those become shared)
+function fixReimbPlan(items,prefix){
   const errors=[],ops=[],notes=[];
   const reemb=S.accounts.find(a=>a.name.trim()==='Reembolsos');
   if(!reemb){errors.push('No encontré la cuenta Reembolsos');return {errors,ops,notes}}
   const r2=v=>Math.round(v*100)/100;
   let shift=0,extra=0;
-  FIX_REEMB_ITEMS.forEach(it=>{
+  items.forEach(it=>{
     const tr=S.transfers.find(t=>t.id===it.tr);
     if(!tr){errors.push(`No encontré el reembolso ${it.person}`);return}
     if(tr.from!==reemb.id){errors.push(`"${tr.desc}" ya no sale de Reembolsos`);return}
@@ -3632,20 +3634,79 @@ function fixReembolsosPlan(){
       lastTx=t;
       ops.push({k:'updTx',id,data:{shared:{enabled:true,mode:'custom',total:t.a,myShare:r2(t.a-a),excess:0,
         people:[{name:it.person,amount:a,paidAmount:a,paid:true,absorbed:false}]}}});
-      ops.push({k:'addTr',id:'fx2_'+it.tr+'_'+id,data:{from:null,to:tr.to,type:'reimbursement',amount:a,d:tr.d,
+      ops.push({k:'addTr',id:prefix+it.tr+'_'+id,data:{from:null,to:tr.to,type:'reimbursement',amount:a,d:tr.d,
         desc:'Reembolso: '+it.person+' - '+t.ds,txId:id,currency:'MXN',fromCurrency:'MXN',toCurrency:'MXN'}});
     }
     if(excess>0.004){
       extra+=excess;
-      ops.push({k:'addTx',id:'fx2_exc_'+it.tr,data:{tp:'income',a:excess,ds:'Excedente: '+(tr.desc||it.person),c:otherIncomeCategoryId(),acc:tr.to,d:tr.d,currency:'MXN',txId:lastTx.id}});
+      ops.push({k:'addTx',id:prefix+'exc_'+it.tr,data:{tp:'income',a:excess,ds:'Excedente: '+(tr.desc||it.person),c:otherIncomeCategoryId(),acc:tr.to,d:tr.d,currency:'MXN',txId:lastTx.id}});
     }
     ops.push({k:'delTr',id:tr.id});
     shift+=tr.amount;
   });
   shift=r2(shift);
   ops.push({k:'updAcc',id:reemb.id,data:{initialBalance:r2((reemb.initialBalance||0)-shift)}});
-  notes.push(`${FIX_REEMB_ITEMS.length} reembolsos por ${fmt(shift)} pasan a estar ligados a su gasto; lo que te dieron de más (${fmt(extra)}) entra a "Otros ingresos".`);
+  notes.push(`${items.length} reembolsos por ${fmt(shift)} pasan a estar ligados a su gasto; lo que te dieron de más (${fmt(extra)}) entra a "Otros ingresos".`);
   notes.push(`Saldo inicial de Reembolsos: ${fmt(reemb.initialBalance||0)} → ${fmt((reemb.initialBalance||0)-shift)}`);
+  return {errors,ops,notes};
+}
+
+// ── Third one-time fix: the unnamed transfers from the pouch, then close the pouch ──
+const FIX_CIERRE_KEY='fixCierreBolsa';
+const FIX3_ITEMS=[
+  {tr:'tr_msmxewvicmvn2h',person:'Diana',alloc:[['mmekvpqakthsm',431]]},                              // 24 feb, publicidad
+  {tr:'tr_mscxfort9cw1',person:'Glashe',alloc:[['mpqivj9t4hpg',627],['mskwn526q24l',276]]},           // carne san juan + oxxo
+  {tr:'tr_mscxh1b3cd28',person:'Andrea',alloc:[['mskwukfzplin',302]]},                                // Mexquitic
+  {tr:'tr_mscxkboghcil',person:'Rober',alloc:[['mskwtguug9n3',632]]},                                 // estadio
+  {tr:'tr_mscxyjolo565',person:'Papá',alloc:[['mscxukl0kfzw',800]]},                                  // pago de notas
+  {tr:'tr_mscyc584896n',person:'Diana',alloc:[['mskx4iqq8yc6',1210],['mskvlduy38k4',192]]},           // gastos diana + mitad del cine
+];
+const FIX3_MARTITA='tr_mscxt6ul2z2w'; // 29 jun $517: Martita bought stickers → income, not a reimbursement
+function fixCierrePlan(){
+  const base=fixReimbPlan(FIX3_ITEMS,'fx3_');
+  const errors=[...base.errors],notes=[...base.notes.filter(n=>!n.startsWith('Saldo inicial'))];
+  let ops=base.ops.filter(o=>o.k!=='updAcc'); // the pouch's starting balance is set once at the end
+  const R=S.accounts.find(a=>a.name.trim()==='Reembolsos');
+  if(!R) return {errors:['No encontré la cuenta Reembolsos'],ops:[],notes:[]};
+  const mt=S.transfers.find(t=>t.id===FIX3_MARTITA);
+  if(!mt||mt.from!==R.id) errors.push('No encontré el pago de Martita del 29 de junio');
+  else{
+    ops.push({k:'delTr',id:mt.id});
+    ops.push({k:'addTx',id:'fx3_martita',data:{tp:'income',a:mt.amount,ds:'Estampas Martita',c:otherIncomeCategoryId(),acc:mt.to,d:mt.d,currency:'MXN'}});
+  }
+  // Close the pouch, working on a copy that already has the steps above
+  const st=fixApplyLocal({transactions:JSON.parse(JSON.stringify(S.transactions)),transfers:JSON.parse(JSON.stringify(S.transfers)),accounts:JSON.parse(JSON.stringify(S.accounts))},ops.filter(o=>o.k!=='updAcc'));
+  const init={};S.accounts.forEach(a=>init[a.id]=a.initialBalance||0);
+  let moved=0,fake=0;
+  // a) "Incomes" dated 2002–2003 that only squared balances: delete; the account keeps its balance through its starting balance
+  st.transactions.filter(t=>t.d<'2025-01-01').forEach(t=>{
+    ops.push({k:'delTx',id:t.id});fake+=t.a;
+    init[t.acc]+=(t.tp==='income'?t.a:-t.a);
+  });
+  // b) Adjustments between the pouch and a real account: delete; that account's starting balance absorbs them
+  st.transfers.filter(t=>(t.from===R.id||t.to===R.id)&&t.type!=='reimbursement'&&t.from&&t.to).forEach(t=>{
+    const other=t.from===R.id?t.to:t.from;
+    if(t.from===R.id){init[other]+=trIn(t);init[R.id]-=trOut(t);} // trIn: in the other account's currency
+    else{init[other]-=trOut(t);init[R.id]+=trIn(t);}
+    ops.push({k:'delTr',id:t.id});moved++;
+  });
+  // c) The pouch keeps only the "crossed" pairs (an expense and its reimbursement, no money moved): they add up to $0
+  const left=withState(fixApplyLocal(st,ops.filter(o=>o.k==='delTx'||o.k==='delTr')),()=>{
+    const a=S.accounts.find(x=>x.id===R.id);const keep=a.initialBalance;a.initialBalance=0;const b=calcAccBalance(R.id);a.initialBalance=keep;return b;
+  });
+  init[R.id]=Math.round(-left*100)/100; // what makes the pouch end at exactly $0
+  Object.keys(init).forEach(id=>{
+    const a=S.accounts.find(x=>x.id===id);
+    const nv=Math.round(init[id]*100)/100;
+    if(id===R.id) ops.push({k:'updAcc',id,data:{initialBalance:nv,name:'Cruces sin dinero'}});
+    else if(Math.abs(nv-(a.initialBalance||0))>0.004){
+      ops.push({k:'updAcc',id,data:{initialBalance:nv}});
+      notes.push(`Saldo inicial de ${a.name}: ${fmt(a.initialBalance||0)} → ${fmt(nv)}`);
+    }
+  });
+  if(Math.abs(left)>0.5) notes.push(`Ojo: en la bolsa quedaban ${fmt(left)} sin explicar; se ajustan para que quede en $0.`);
+  notes.push(`Se borran ${Math.round(fake)>0?'los "ingresos" de 2002–2003 ('+fmt(fake)+')':'0 movimientos viejos'} y ${moved} ajustes entre la bolsa y tus cuentas (incluye $3,440 del 23 abr y $3,930 del 8 ago como ajustes).`);
+  notes.push('La bolsa Reembolsos se renombra "Cruces sin dinero" y queda en $0. Tu patrimonio sube lo que estaba en negativo en ella, porque esa bolsa no era dinero real.');
   return {errors,ops,notes};
 }
 
@@ -3660,6 +3721,9 @@ const FIXES={
   reembolsos:{key:FIX_REEMB_KEY,title:'Reembolsos con nombre (ene–jun)',plan:()=>fixReembolsosPlan(),
     intro:()=>`Vuelo CDMX (tu mamá, la mitad), tacos tranquis, ubers del viaje, publicidad de Diana, cervecería con Victor, comida del estadio, comida rayados, tortas, Josephinos, sobres de Koke, día de las madres y las notas de tu mamá: cada gasto queda compartido y el reembolso ligado a él.`,
     months:['2026-01','2026-02','2026-03','2026-05','2026-06']},
+  cierre:{key:FIX_CIERRE_KEY,title:'Transferencias sin nombre y cierre de la bolsa Reembolsos',plan:()=>fixCierrePlan(),
+    intro:()=>`Diana (publicidad 24 feb, y $1,402 del 28 jul: gastos Diana + mitad del cine), Glashe (carne san juan + Oxxo), Andrea (Mexquitic), Rober (estadio) y tu papá (pago de notas 8 jul) quedan ligados a su gasto. Lo de Martita ($517) pasa a ingreso por venta de estampas.`,
+    months:['2026-02','2026-05','2026-06','2026-07']},
 };
 let _fixOpen=null;
 function openFix(kind){
@@ -3669,7 +3733,8 @@ function openFix(kind){
   const copy={transactions:JSON.parse(JSON.stringify(S.transactions)),transfers:JSON.parse(JSON.stringify(S.transfers)),accounts:JSON.parse(JSON.stringify(S.accounts))};
   const after=withState(fixApplyLocal(copy,plan.ops),()=>fixStats(F.months));
   const row=(l,a,b)=>`<div class="flex-between text-xs" style="padding:3px 0"><span>${l}</span><span class="text-mono">${fmt0(a)} → <b>${fmt0(b)}</b></span></div>`;
-  const changedBal=Object.keys(before.bal).filter(n=>Math.abs((before.bal[n]||0)-(after.bal[n]||0))>0.005);
+  const accName=id=>(S.accounts.find(a=>a.id===id)||{name:id}).name;
+  const changedBal=Object.keys({...before.bal,...after.bal}).filter(n=>Math.abs((before.bal[n]||0)-(after.bal[n]||0))>0.005).map(id=>`${accName(id)} (${fmt(before.bal[id]||0)} → ${fmt(after.bal[id]||0)})`);
   let h=plan.errors.length?`<div class="card" style="border:2px solid var(--red)"><div class="text-sm fw-600" style="color:var(--red)">No se puede aplicar</div>${plan.errors.map(e=>`<div class="text-xs mt-4">• ${e}</div>`).join('')}</div>`:'';
   h+=`<div class="text-xs" style="color:var(--txt2);line-height:1.5">${F.intro()}<br>${plan.notes.map(n=>'• '+n).join('<br>')}</div>
     <div class="text-sm fw-600 mt-8">Gastos del mes (todo)</div>
