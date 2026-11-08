@@ -461,6 +461,7 @@ label{display:block;font-size:.8rem;color:var(--txt2);margin-bottom:4px;font-wei
     <div class="currency-toggle"><div class="currency-opt active" data-cur="MXN" onclick="setAccCurrency('MXN')">🇲🇽 MXN</div><div class="currency-opt" data-cur="USD" onclick="setAccCurrency('USD')">🇺🇸 USD</div></div>
   </div>
   <div class="form-group"><label>Saldo inicial</label><input type="number" id="accInitBal" inputmode="decimal" step="0.01" value="0"></div>
+  <div class="form-group"><label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="accHidden" style="width:auto"> Ocultar en mis cuentas (sigue contando en saldos)</label></div>
   <div class="form-group"><label>Icono</label><div class="chips-row" id="accIconPicker"></div></div>
   <div class="form-group"><label>Color</label><div class="color-picker" id="accColorPicker"></div></div>
   <div style="margin-top:16px;display:flex;gap:8px">
@@ -653,7 +654,7 @@ let S={
   accounts:[],categories:[],transactions:[],transfers:[],debts:[],goals:[],budgets:{},
   budgetMonths:{},provisions:[],
   exchangeRates:{},meta:{},
-  erUnlocked:{},
+  erUnlocked:{},showHiddenAcc:false,
   scope:(()=>{try{return localStorage.getItem('scope')||'all'}catch(e){return 'all'}})(),
   month:'',year:0,
   currentTab:'tabInicio',
@@ -881,9 +882,9 @@ function useCounts(){
   return {acc,cat};
 }
 // Accounts, most used first (ties keep their usual order).
-function accountsByUse(){
+function accountsByUse(keepId){
   const n=useCounts().acc;
-  return S.accounts.map((a,i)=>({a,i})).sort((x,y)=>(n[y.a.id]||0)-(n[x.a.id]||0)||x.i-y.i).map(x=>x.a);
+  return S.accounts.filter(a=>!a.hidden||a.id===keepId).map((a,i)=>({a,i})).sort((x,y)=>(n[y.a.id]||0)-(n[x.a.id]||0)||x.i-y.i).map(x=>x.a);
 }
 // Categories (optionally of one type), most used first, then alphabetical.
 function categoriesByUse(type){
@@ -1264,7 +1265,7 @@ function renderDash(){
     </div>
     <div class="accounts-scroll">`;
 
-  S.accounts.forEach(acc=>{
+  S.accounts.filter(a=>!a.hidden).forEach(acc=>{
     const bal=calcAccBalance(acc.id);
     const cur=acc.currency||'MXN';
     const isU=cur==='USD';
@@ -1768,7 +1769,8 @@ function renderCuentas(){
   const typeOrder=['debit','credit','savings','cash','other'];
   const typeLabels={debit:'DEBITO',credit:'CREDITO',savings:'AHORRO',cash:'EFECTIVO',other:'OTRO'};
   const groups={};
-  S.accounts.forEach(acc=>{
+  const hiddenAccs=S.accounts.filter(a=>a.hidden);
+  S.accounts.filter(a=>!a.hidden||S.showHiddenAcc).forEach(acc=>{
     const t=acc.type||'other';
     if(!groups[t]) groups[t]=[];
     groups[t].push(acc);
@@ -1804,7 +1806,7 @@ function renderCuentas(){
             <div style="width:38px;height:38px;border-radius:10px;background:${acc.color}15;display:flex;align-items:center;justify-content:center;font-size:1.1rem">${acc.icon}</div>
             <div>
               <div class="text-sm fw-600">${acc.name}</div>
-              <div class="text-xs" style="color:var(--txt3)">${isU?'USD':'MXN'} · ${type==='credit'?'Credito':type==='debit'?'Debito':type==='savings'?'Ahorro':type==='cash'?'Efectivo':'Otro'}</div>
+              <div class="text-xs" style="color:var(--txt3)">${isU?'USD':'MXN'} · ${type==='credit'?'Credito':type==='debit'?'Debito':type==='savings'?'Ahorro':type==='cash'?'Efectivo':'Otro'}${acc.hidden?' · Oculta':''}</div>
             </div>
           </div>
           <div style="text-align:right">
@@ -1816,6 +1818,9 @@ function renderCuentas(){
       </div>`;
     });
   });
+
+  // Hidden accounts: still count in balances and net worth, only shown on request
+  if(hiddenAccs.length) html+=`<div class="text-xs pointer" style="text-align:center;color:var(--txt3);padding:12px" onclick="S.showHiddenAcc=!S.showHiddenAcc;R()">${S.showHiddenAcc?'Esconder cuentas ocultas':'Cuentas ocultas ('+hiddenAccs.length+')'}</div>`;
 
   document.getElementById('cuentasContent').innerHTML=html;
 }
@@ -2342,7 +2347,7 @@ function openTxModal(type,editId){
   const accSel=document.getElementById('txAcc');
   // Most used accounts first; a new movement starts on the account last used for its type
   const defAcc=tx?tx.acc:lastUsedAccount(S.txType);
-  accSel.innerHTML=accountsByUse().map(a=>`<option value="${a.id}" ${a.id===defAcc?'selected':''}>${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
+  accSel.innerHTML=accountsByUse(defAcc).map(a=>`<option value="${a.id}" ${a.id===defAcc?'selected':''}>${a.icon} ${a.name} (${a.currency||'MXN'})</option>`).join('');
 
   // Check if selected account is USD
   const selectedAcc=tx?tx.acc:accSel.value;
@@ -2736,6 +2741,7 @@ function openAccModal(editId){
   document.getElementById('accName').value=acc?acc.name:'';
   document.getElementById('accType').value=acc?acc.type:'debit';
   document.getElementById('accInitBal').value=acc?acc.initialBalance:0;
+  document.getElementById('accHidden').checked=!!(acc&&acc.hidden);
 
   S.accCurrency=acc?acc.currency||'MXN':'MXN';
   document.querySelectorAll('#accModal .currency-opt').forEach(el=>{
@@ -2771,6 +2777,7 @@ async function saveAcc(){
     initialBalance:parseFloat(document.getElementById('accInitBal').value)||0,
     icon:iconEl?iconEl.dataset.icon:'💳',
     color:getSelectedColor('accColorPicker'),
+    hidden:document.getElementById('accHidden').checked,
   };
 
   if(editId){
@@ -3433,6 +3440,10 @@ async function initApp(){
     // Load data from Firestore
     await loadAll();
 
+    // The betting account only exists to keep the record straight: hide it once (it can be shown again from Cuentas)
+    const md=S.accounts.find(a=>a.id==='a_malas_decisiones');
+    if(md&&md.hidden===undefined){md.hidden=true;fsUpdate('accounts',md.id,{hidden:true}).catch(e=>console.error('hide',e));}
+
     // Give categories that share a color within their type a color of their own (runs once; no-op afterwards)
     try{ensureUniqueCategoryColors()}catch(e){console.error('colors',e)}
 
@@ -3819,7 +3830,7 @@ function applyFixMundial(){return applyFix('mundial')}
 // Cards in Ajustes: pending fixes first (to review), applied ones as a short line
 function fixMundialCardHTML(){
   return Object.entries(FIXES).map(([kind,F])=>{
-    if(S.meta&&S.meta[F.key]) return `<div class="card" style="padding:10px 16px"><div class="text-xs">✅ ${F.title} · aplicada el ${S.meta[F.key]}</div></div>`;
+    if(S.meta&&S.meta[F.key]) return ''; // already applied: nothing to show
     return `<div class="card" style="border:2px solid var(--accent)">
       <div class="text-sm fw-600">Corrección pendiente: ${F.title}</div>
       <div class="text-xs mt-4" style="color:var(--txt2)">Revisa los cambios antes de aplicarlos. No se aplica nada hasta que confirmes.</div>
